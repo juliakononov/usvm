@@ -28,12 +28,14 @@ import org.jacodb.api.jvm.cfg.JcReturnInst
 import org.jacodb.api.jvm.cfg.JcSwitchInst
 import org.jacodb.api.jvm.cfg.JcThis
 import org.jacodb.api.jvm.cfg.JcThrowInst
+import org.jacodb.api.jvm.ext.autoboxIfNeeded
 import org.jacodb.api.jvm.ext.boolean
 import org.jacodb.api.jvm.ext.cfg.callExpr
 import org.jacodb.api.jvm.ext.humanReadableSignature
 import org.jacodb.api.jvm.ext.ifArrayGetElementType
 import org.jacodb.api.jvm.ext.isEnum
 import org.jacodb.api.jvm.ext.toType
+import org.jacodb.api.jvm.ext.void
 import org.usvm.ForkCase
 import org.usvm.StepResult
 import org.usvm.StepScope
@@ -63,6 +65,7 @@ import org.usvm.machine.JcMethodApproximationResolver
 import org.usvm.machine.JcMethodCall
 import org.usvm.machine.JcMethodCallBaseInst
 import org.usvm.machine.JcMethodEntrypointInst
+import org.usvm.machine.JcReflectionInvokeResult
 import org.usvm.machine.JcVirtualMethodCallInst
 import org.usvm.machine.mocks.mockMethod
 import org.usvm.machine.state.JcMethodResult
@@ -82,6 +85,7 @@ import org.usvm.memory.URegisterStackLValue
 import org.usvm.solver.USatResult
 import org.usvm.targets.UTargetsSet
 import org.usvm.types.singleOrNull
+import org.usvm.util.findMethod
 import org.usvm.util.name
 import org.usvm.util.outerClassInstanceField
 import org.usvm.util.write
@@ -277,6 +281,24 @@ class JcInterpreter(
                 scope.calcOnState { skipMethodInvocationWithValue(stmt, stmt.returnExpr) }
             }
 
+            is JcReflectionInvokeResult -> {
+                scope.doWithState {
+                    val result = (methodResult as JcMethodResult.Success).value
+                    when (val returnType = stmt.invokeMethod.returnType) {
+                        ctx.cp.void -> skipMethodInvocationWithValue(stmt, ctx.nullRef)
+                        is JcPrimitiveType -> {
+                            val boxedType = returnType.autoboxIfNeeded() as JcClassType
+                            val boxMethod = boxedType.declaredMethods.find {
+                                it.name == "valueOf" && it.isStatic && it.parameters.singleOrNull() == returnType
+                            }!!
+                            newStmt(JcConcreteMethodCallInst(stmt.location, boxMethod.method, listOf(result), stmt.returnSite))
+                        }
+
+                        else -> skipMethodInvocationWithValue(stmt, result)
+                    }
+                }
+            }
+
             is JcConcreteMethodCallInst -> {
                 observer?.onMethodCallWithResolvedArguments(simpleValueResolver, stmt, scope)
 
@@ -331,7 +353,7 @@ class JcInterpreter(
 
                 if (method.isFinal) {
                     // Case for approximated interfaces
-                    with (stmt) {
+                    with(stmt) {
                         scope.doWithState {
                             newStmt(JcConcreteMethodCallInst(location, method, arguments, returnSite))
                         }

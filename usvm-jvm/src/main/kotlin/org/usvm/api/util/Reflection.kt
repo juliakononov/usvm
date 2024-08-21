@@ -17,6 +17,7 @@ import org.jacodb.api.jvm.ext.int
 import org.jacodb.api.jvm.ext.jcdbSignature
 import org.jacodb.api.jvm.ext.long
 import org.jacodb.api.jvm.ext.short
+import org.jacodb.api.jvm.ext.void
 import sun.misc.Unsafe
 import java.lang.reflect.Constructor
 import java.lang.reflect.Field
@@ -66,6 +67,7 @@ object Reflection {
             classpath.double -> Double::class.javaPrimitiveType!!
             classpath.byte -> Byte::class.javaPrimitiveType!!
             classpath.char -> Char::class.javaPrimitiveType!!
+            classpath.void -> Void::class.javaPrimitiveType!!
             is JcRefType -> toJavaClass(classLoader)
             else -> error("Unexpected type: $this")
         }

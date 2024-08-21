@@ -297,6 +297,7 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "java.security")
         openPackage("java.base", "java.time")
         openPackage("java.base", "jdk.internal.access")
+        openPackage("java.base", "sun.reflect.annotation")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")
         add("--illegal-access=warn")

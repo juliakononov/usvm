@@ -36,6 +36,7 @@ import org.jacodb.api.jvm.ext.objectType
 import org.jacodb.api.jvm.ext.short
 import org.jacodb.api.jvm.ext.toType
 import org.jacodb.api.jvm.ext.void
+import org.jacodb.impl.cfg.util.isPrimitive
 import org.jacodb.impl.features.classpaths.JcUnknownClass
 import org.usvm.UBoolExpr
 import org.usvm.UBv32Sort
@@ -189,10 +190,6 @@ class JcMethodApproximationResolver(
             if (approximateMethodMethod(methodCall)) return true
         }
 
-        if (className == "org.apache.commons.logging.Log") {
-            if (approximateLoggerMethod(methodCall)) return true
-        }
-
         if (className == "org.springframework.web.method.HandlerMethod") {
             if (approximateHandlerMethod(methodCall)) return true
         }
@@ -244,6 +241,14 @@ class JcMethodApproximationResolver(
             if (approximateClassUtilsStaticMethod(methodCall)) return true
         }
 
+        if (className == "jdk.internal.reflect.Reflection") {
+            if (approximateJavaReflectionMethod(methodCall)) return true
+        }
+
+        if (className == "java.lang.reflect.Array") {
+            if (approximateArrayReflectionMethod(methodCall)) return true
+        }
+
         return approximateEmptyNativeMethod(methodCall)
     }
 
@@ -279,7 +284,8 @@ class JcMethodApproximationResolver(
         if (method.name == "getPrimitiveClass") {
             val classNameRef = arguments.single()
 
-            val predefinedTypeNames = ctx.primitiveTypes.associateBy {
+            val primitiveTypes = ctx.primitiveTypes + ctx.cp.void
+            val predefinedTypeNames = primitiveTypes.associateBy {
                 exprResolver.simpleValueResolver.resolveStringConstant(it.typeName)
             }
 
@@ -306,6 +312,21 @@ class JcMethodApproximationResolver(
             scope.doWithState {
                 skipMethodInvocationWithValue(methodCall, ctx.trueExpr)
             }
+            return true
+        }
+
+        if (method.name == "isInstance") {
+            val classRef = arguments[0].asExpr(ctx.addressSort)
+            val objectRef = arguments[1].asExpr(ctx.addressSort)
+            scope.doWithState {
+                val classRefTypeRepresentative =
+                    memory.read(UFieldLValue(ctx.addressSort, classRef, ctx.classTypeSyntheticField))
+                classRefTypeRepresentative as UConcreteHeapRef
+                val classType = memory.types.typeOf(classRefTypeRepresentative.address)
+                val isExpr = memory.types.evalIsSubtype(objectRef, classType)
+                skipMethodInvocationWithValue(methodCall, isExpr)
+            }
+
             return true
         }
 
@@ -392,6 +413,42 @@ class JcMethodApproximationResolver(
             scope.doWithState {
                 val packageName = memory.tryAllocateConcrete(javaClass.packageName, ctx.stringType)!!
                 skipMethodInvocationWithValue(methodCall, packageName)
+            }
+
+            return true
+        }
+
+        return false
+    }
+
+    private fun approximateJavaReflectionMethod(methodCall: JcMethodCall): Boolean = with(methodCall) {
+        if (method.name == "getCallerClass") {
+            scope.doWithState {
+                val callerClass = callStack.penultimateMethod().enclosingClass.toType()
+                val classRef = exprResolver.simpleValueResolver.resolveClassRef(callerClass)
+                skipMethodInvocationWithValue(methodCall, classRef)
+            }
+
+            return true
+        }
+
+        return false
+    }
+
+    private fun approximateArrayReflectionMethod(methodCall: JcMethodCall): Boolean = with(methodCall) {
+        if (method.name == "newInstance" && method.parameters[1].type.isPrimitive) {
+            scope.doWithState {
+                val componentTypeRef = arguments[0].asExpr(ctx.addressSort)
+                val componentTypeRepresentative =
+                    memory.read(UFieldLValue(ctx.addressSort, componentTypeRef, ctx.classTypeSyntheticField))
+                componentTypeRepresentative as UConcreteHeapRef
+                val componentType = memory.types.typeOf(componentTypeRepresentative.address)
+                val arrayType = ctx.cp.arrayTypeOf(componentType)
+                val arrayRef = memory.allocConcrete(arrayType)
+                val descriptor = ctx.arrayDescriptorOf(arrayType)
+                val sizeExpr = arguments[1].asExpr(ctx.sizeSort)
+                memory.initializeArrayLength(arrayRef, descriptor, ctx.sizeSort, sizeExpr)
+                skipMethodInvocationWithValue(methodCall, arrayRef)
             }
 
             return true
@@ -585,6 +642,17 @@ class JcMethodApproximationResolver(
             return true
         }
 
+        if (methodName.equals("internalLog")) {
+            scope.doWithState {
+                val messageExpr = methodCall.arguments[1].asExpr(ctx.addressSort) as UConcreteHeapRef
+                val message = memory.tryHeapRefToObject(messageExpr) as String
+                println("\u001B[36m" + message + "\u001B[0m")
+                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
+            }
+
+            return true
+        }
+
         return false
     }
 
@@ -616,36 +684,8 @@ class JcMethodApproximationResolver(
                 val parameters =
                     if (jcMethod.isStatic) arguments
                     else listOf(thisArg) + arguments
-                newStmt(JcConcreteMethodCallInst(methodCall.location, jcMethod.method, parameters, methodCall.returnSite))
-            }
-
-            return true
-        }
-
-        return false
-    }
-
-    private val loggerLevelCheckMethods = setOf(
-        "isFatalEnabled", "isErrorEnabled", "isWarnEnabled", "isInfoEnabled", "isDebugEnabled", "isTraceEnabled"
-    )
-
-    private val loggerPrintMethods = setOf(
-        "fatal", "error", "warn", "info", "debug", "trace"
-    )
-
-    private fun approximateLoggerMethod(methodCall: JcMethodCall): Boolean = with(methodCall) {
-        val methodName = method.name
-        if (loggerLevelCheckMethods.contains(methodName)) {
-            scope.doWithState {
-                skipMethodInvocationWithValue(methodCall, ctx.falseExpr)
-            }
-
-            return true
-        }
-
-        if (loggerPrintMethods.contains(methodName)) {
-            scope.doWithState {
-                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
+                val postProcessInst = JcReflectionInvokeResult(methodCall, jcMethod)
+                newStmt(JcConcreteMethodCallInst(methodCall.location, jcMethod.method, parameters, postProcessInst))
             }
 
             return true

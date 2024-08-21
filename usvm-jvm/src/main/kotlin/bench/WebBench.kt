@@ -47,7 +47,6 @@ import kotlin.system.measureNanoTime
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.nanoseconds
 
-
 private fun loadWebPetClinicBench(): BenchCp {
     val petClinicDir = Path("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF")
     return loadWebAppBenchCp(petClinicDir / "classes", petClinicDir / "lib").apply {
@@ -204,7 +203,7 @@ private fun analyzeBench(benchmark: BenchCp) {
         solverTimeout = Duration.INFINITE, // we do not need the timeout for a solver in tests
         typeOperationsTimeout = Duration.INFINITE, // we do not need the timeout for type operations in tests
     )
-    val jcMachineOptions = JcMachineOptions(projectLocations = benchmark.registeredBenchLocations.toSet())
+    val jcMachineOptions = JcMachineOptions(projectLocations = benchmark.registeredBenchLocations.toSet(), forkOnImplicitExceptions = false)
     val testResolver = JcTestInterpreter()
     val newBench = generateTestClass(benchmark)
     val cp = newBench.cp

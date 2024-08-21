@@ -325,6 +325,8 @@ class JcExprResolver(
         val ref = resolveJcExpr(expr.operand)?.asExpr(addressSort) ?: return null
         scope.calcOnState {
             val notEqualsNull = mkHeapRefEq(ref, memory.nullRef()).not()
+            if (expr.targetType.typeName.contains("ServletRequestAttributes"))
+                println()
             val isExpr = memory.types.evalIsSubtype(ref, expr.targetType)
             mkAnd(notEqualsNull, isExpr)
         }
@@ -612,7 +614,6 @@ class JcExprResolver(
         // the enum value equal to the one of corresponding enum constants
         val invariantsConstraint = mkIteNoSimplify(isEnumNull, trueExpr, oneOfEnumInstances)
 
-
         scope.assert(invariantsConstraint)
             .logAssertFailure { "JcExprResolver: enum correctness constraint" }
     }
@@ -669,7 +670,6 @@ class JcExprResolver(
                 ?: error("Cannot assert enum correctness constraint for a constant of the enum class ${type.name}")
         }
     }
-
 
     /**
      * Run a class static initializer for [type] if it didn't run before the current state.
@@ -810,10 +810,10 @@ class JcExprResolver(
         }
     }
 
-    fun checkClassCast(expr: UHeapRef, type: JcType) = with(ctx) {
+    fun checkClassCast(expr: UHeapRef, type: JcType): Unit? {
         val isExpr = scope.calcOnState { memory.types.evalIsSubtype(expr, type) }
 
-        if (options.forkOnImplicitExceptions) {
+        return if (options.forkOnImplicitExceptions) {
             scope.fork(
                 isExpr,
                 blockOnFalseState = allocateException(ctx.classCastExceptionType)
