@@ -49,6 +49,7 @@ import org.usvm.api.allocateStaticRef
 import org.usvm.api.evalTypeEquals
 import org.usvm.api.mapTypeStream
 import org.usvm.api.targets.JcTarget
+import org.usvm.api.typeStreamOf
 import org.usvm.api.util.JcConcreteMemoryClassLoader
 import org.usvm.api.util.Reflection.toJavaClass
 import org.usvm.collection.array.UArrayIndexLValue
@@ -84,6 +85,7 @@ import org.usvm.memory.ULValue
 import org.usvm.memory.URegisterStackLValue
 import org.usvm.solver.USatResult
 import org.usvm.targets.UTargetsSet
+import org.usvm.types.single
 import org.usvm.types.singleOrNull
 import org.usvm.util.findMethod
 import org.usvm.util.name
@@ -342,9 +344,19 @@ class JcInterpreter(
             is JcVirtualMethodCallInst -> {
                 observer?.onMethodCallWithResolvedArguments(simpleValueResolver, stmt, scope)
 
-                if (scope.calcOnState { memory.tryConcreteInvoke(stmt, this, exprResolver) }) {
-                    return
-                }
+//                if (scope.calcOnState { memory.tryConcreteInvoke(stmt, this, exprResolver) }) {
+//                    val model = scope.calcOnState { models.first() }
+//                    val instance = stmt.arguments.first().asExpr(ctx.addressSort)
+//                    val concreteRef = model.eval(instance) as UConcreteHeapRef
+//                    val type = scope.calcOnState { memory.typeStreamOf(concreteRef) }.single() as JcRefType
+//                    val concreteMethod = type.findMethod(method)!!
+//                    val call = stmt.toConcreteMethodCall(concreteMethod.method)
+//                    if (stmt.method.humanReadableSignature != call.method.humanReadableSignature) {
+//                        println("\u001B[31m" + "[Virt] ${stmt.method.humanReadableSignature}" + "\u001B[0m")
+//                        println("\u001B[31m" + "[Virt] Add ${call.method.humanReadableSignature}" + "\u001B[0m")
+//                    }
+//                    return
+//                }
 
                 if (approximateMethod(scope, stmt)) {
                     println("\u001B[31m" + "Approximated ${stmt.method.humanReadableSignature}" + "\u001B[0m")

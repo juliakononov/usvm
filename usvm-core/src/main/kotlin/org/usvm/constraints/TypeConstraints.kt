@@ -99,9 +99,18 @@ class UTypeConstraints<Type>(
      * Binds concrete heap address [ref] to its [type].
      */
     fun allocate(ref: UConcreteHeapAddress, type: Type) {
+        // TODO: delete #CM
+        check(!concreteRefToType.containsKey(ref)) {
+            "UTypeConstraints.allocate failed: address $ref already exists"
+        }
         concreteRefToType = concreteRefToType.put(ref, type)
 
         equalityConstraints.updateDisequality(ctx.mkConcreteHeapRef(ref))
+    }
+
+    // TODO: delete #CM
+    fun remove(ref: UConcreteHeapAddress) {
+        concreteRefToType = concreteRefToType.remove(ref)
     }
 
     /**

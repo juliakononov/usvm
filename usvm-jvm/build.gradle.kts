@@ -247,6 +247,7 @@ tasks.register<JavaExec>("runWebBench") {
 
     jvmArgs = listOf("-Xmx15g") + mutableListOf<String>().apply {
         add("-Djava.security.manager -Djava.security.policy=webExplorationPolicy.policy")
+        add("-Djdk.internal.lambda.dumpProxyClasses=/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes/")
         openPackage("java.base", "jdk.internal.misc")
         openPackage("java.base", "java.lang")
         openPackage("java.base", "java.lang.reflect")
@@ -298,8 +299,11 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "java.time")
         openPackage("java.base", "jdk.internal.access")
         openPackage("java.base", "sun.reflect.annotation")
+        openPackage("java.base", "sun.nio.cs")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")
+        exportPackage("java.base", "jdk.internal.reflect")
+        exportPackage("java.base", "sun.nio.cs")
         add("--illegal-access=warn")
     }
 }

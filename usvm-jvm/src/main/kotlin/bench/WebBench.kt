@@ -219,7 +219,7 @@ private fun analyzeBench(benchmark: BenchCp) {
     val startClass = publicClasses.find { it.simpleName == "NewStartSpring" }!!.toType()
     val method = startClass.declaredMethods.find { it.name == "startSpring" }!!
     // using file instead of console
-    val fileStream = PrintStream("/Users/michael/Documents/Work/usvm/springLog.txt")
+    val fileStream = PrintStream("/Users/michael/Documents/Work/usvm/springLog.ansi")
     System.setOut(fileStream)
     JcMachine(cp, options, jcMachineOptions).use { machine ->
         val states = machine.analyze(method.method)

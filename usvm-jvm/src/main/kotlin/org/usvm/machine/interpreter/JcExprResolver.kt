@@ -325,8 +325,6 @@ class JcExprResolver(
         val ref = resolveJcExpr(expr.operand)?.asExpr(addressSort) ?: return null
         scope.calcOnState {
             val notEqualsNull = mkHeapRefEq(ref, memory.nullRef()).not()
-            if (expr.targetType.typeName.contains("ServletRequestAttributes"))
-                println()
             val isExpr = memory.types.evalIsSubtype(ref, expr.targetType)
             mkAnd(notEqualsNull, isExpr)
         }
@@ -357,8 +355,6 @@ class JcExprResolver(
 
             val arrayDescriptor = arrayDescriptorOf(expr.type as JcArrayType)
             memory.write(UArrayLengthLValue(ref, arrayDescriptor, sizeSort), size)
-            // overwrite array type because descriptor is element type (which is Object for arrays of refs)
-            memory.types.allocate(ref.address, expr.type)
 
             ref
         }
@@ -1073,7 +1069,7 @@ class JcSimpleValueResolver(
             val stringValueLValue = UFieldLValue(addressSort, ref, stringValueField.field)
 
             // String.value type depends on the JVM version
-            val charValues = when (stringValueField.type.ifArrayGetElementType) {
+            val values = when (stringValueField.type.ifArrayGetElementType) {
                 cp.char -> value.value.asSequence().map { mkBv(it.code, charSort) }
                 cp.byte -> value.value.encodeToByteArray().asSequence().map { mkBv(it, byteSort) }
                 else -> error("Unexpected string values type: ${stringValueField.type}")
@@ -1082,17 +1078,17 @@ class JcSimpleValueResolver(
             val arrayType = stringValueField.type as JcArrayType
             val valuesArrayDescriptor = arrayDescriptorOf(arrayType)
             val elementType = requireNotNull(stringValueField.type.ifArrayGetElementType)
-            val charArrayRef = memory.allocConcrete(arrayType)
+            val arrayRef = memory.allocConcrete(arrayType)
             memory.initializeArray(
-                charArrayRef,
+                arrayRef,
                 valuesArrayDescriptor,
                 typeToSort(elementType),
                 sizeSort,
-                charValues.uncheckedCast()
+                values.uncheckedCast()
             )
 
             // String constants are immutable. Therefore, it is correct to overwrite value, coder and type.
-            memory.write(stringValueLValue, charArrayRef)
+            memory.write(stringValueLValue, arrayRef)
 
             // Write coder only if it is presented (depends on the JVM version)
             stringCoderField?.let {

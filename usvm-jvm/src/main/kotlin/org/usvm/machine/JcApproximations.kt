@@ -1106,11 +1106,11 @@ class JcMethodApproximationResolver(
     }
 
     private fun skipMethodIfThrowable(methodCall: JcMethodCall): Boolean = with(methodCall) {
-        if (method.enclosingClass.name == "java.lang.Throwable") {
-            // We assume that methods of java.lang.Throwable are not really required to be analysed and can be simply mocked
-            mockMethod(scope, methodCall, applicationGraph)
-            return true
-        }
+//        if (method.enclosingClass.name == "java.lang.Throwable") {
+//            // We assume that methods of java.lang.Throwable are not really required to be analysed and can be simply mocked
+//            mockMethod(scope, methodCall, applicationGraph)
+//            return true
+//        }
 
         return false
     }
