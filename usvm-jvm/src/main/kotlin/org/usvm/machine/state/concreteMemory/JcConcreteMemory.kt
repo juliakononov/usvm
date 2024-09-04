@@ -54,6 +54,7 @@ import org.usvm.UConcreteHeapRef
 import org.usvm.UExpr
 import org.usvm.UHeapRef
 import org.usvm.UIndexedMocker
+import org.usvm.UIteExpr
 import org.usvm.UNullRef
 import org.usvm.USort
 import org.usvm.USymbol
@@ -91,6 +92,7 @@ import org.usvm.collection.set.ref.URefSetEntryLValue
 import org.usvm.collection.set.ref.URefSetRegion
 import org.usvm.collection.set.ref.URefSetRegionId
 import org.usvm.constraints.UTypeConstraints
+import org.usvm.isFalse
 import org.usvm.isTrue
 import org.usvm.machine.JcConcreteInvocationResult
 import org.usvm.machine.JcContext
@@ -189,7 +191,7 @@ private val JcClassType.allFields: List<JcTypedField>
 private val Class<*>.allFields: Array<Field>
     get() = declaredFields + (superclass?.allFields ?: emptyArray())
 
-private val JcClassType.allInstanceFields: List<JcTypedField>
+val JcClassType.allInstanceFields: List<JcTypedField>
     get() = allFields.filter { !it.isStatic }
 
 private val JcClassType.declaredInstanceFields: List<JcTypedField>
@@ -340,8 +342,8 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun addToParents(parent: PhysicalAddress, child: PhysicalAddress, childKind: ChildKind) {
-        assert(parent.obj != null)
-        assert(child.obj != null)
+        check(parent.obj != null)
+        check(child.obj != null)
         val parentMap = parents.getOrPut(child) { mutableMapOf() }
         parentMap[parent] = childKind
     }
@@ -357,7 +359,7 @@ private class JcConcreteMemoryBindings(
                 } else if (childMap != null) {
                     val cell = childMap[childKind]
                     if (cell != null) {
-                        assert(!cell.isConcrete || cell.address == child)
+                        check(!cell.isConcrete || cell.address == child)
                     } else {
                         childMap[childKind] = Cell(child)
                     }
@@ -380,7 +382,7 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun trackChild(parent: Any?, child: Any?, childKind: ChildKind) {
-        assert(parent !is PhysicalAddress && child !is PhysicalAddress)
+        check(parent !is PhysicalAddress && child !is PhysicalAddress)
         trackChild(PhysicalAddress(parent), PhysicalAddress(child), childKind)
     }
 
@@ -389,7 +391,7 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun setChild(parent: Any?, child: Any?, childKind: ChildKind) {
-        assert(parent !is PhysicalAddress && child !is PhysicalAddress)
+        check(parent !is PhysicalAddress && child !is PhysicalAddress)
         setChild(PhysicalAddress(parent), PhysicalAddress(child), childKind)
     }
 
@@ -508,7 +510,7 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun checkTrackCopy(dstArrayType: Class<*>, dstFromIdx: Int, dstToIdx: Int): Boolean {
-        assert(dstFromIdx <= dstToIdx)
+        check(dstFromIdx <= dstToIdx)
         val elemType = dstArrayType.componentType
         return !elemType.notTracked
     }
@@ -516,7 +518,7 @@ private class JcConcreteMemoryBindings(
     private fun trackCopy(updatedDstArray: Array<*>, dstArrayType: Class<*>, dstFromIdx: Int, dstToIdx: Int) {
         if (!checkTrackCopy(dstArrayType, dstFromIdx, dstToIdx)) return
 
-        for (i in dstFromIdx..dstToIdx) {
+        for (i in dstFromIdx..<dstToIdx) {
             setChild(updatedDstArray, updatedDstArray[i], ArrayIndexChildKind(i))
         }
     }
@@ -564,8 +566,8 @@ private class JcConcreteMemoryBindings(
     )
 
     fun allocate(address: UConcreteHeapAddress, obj: Any, type: JcType) {
-        assert(address != NULL_ADDRESS)
-        assert(!virtToPhys.containsKey(address))
+        check(address != NULL_ADDRESS)
+        check(!virtToPhys.containsKey(address))
         val physicalAddress = PhysicalAddress(obj)
         virtToPhys[address] = physicalAddress
         physToVirt[physicalAddress] = address
@@ -615,7 +617,7 @@ private class JcConcreteMemoryBindings(
         private var closureArgs: List<Any?> = listOf()
 
         fun init(actualMethod: JcMethod, methodName: String, args: List<Any?>) {
-            assert(actualMethod !is JcEnrichedVirtualMethod)
+            check(actualMethod !is JcEnrichedVirtualMethod)
             this.methodName = methodName
             this.actualMethod = actualMethod
             closureArgs = args
@@ -635,7 +637,7 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun createProxy(type: JcClassType): Any {
-        assert(type.jcClass.isInterface)
+        check(type.jcClass.isInterface)
         return Proxy.newProxyInstance(
             JcConcreteMemoryClassLoader,
             arrayOf(type.toJavaClass(JcConcreteMemoryClassLoader)),
@@ -747,7 +749,7 @@ private class JcConcreteMemoryBindings(
 
     fun readInvocationHandler(address: UConcreteHeapAddress): LambdaInvocationHandler {
         val obj = virtToPhys(address)
-        assert(Proxy.isProxyClass(obj.javaClass))
+        check(Proxy.isProxyClass(obj.javaClass))
         return Proxy.getInvocationHandler(obj) as LambdaInvocationHandler
     }
 
@@ -798,60 +800,60 @@ private class JcConcreteMemoryBindings(
         if (success) {
             val obj = virtToPhys(address)
             val arrayType = obj.javaClass
-            assert(arrayType.isArray)
+            check(arrayType.isArray)
             val elemType = arrayType.componentType
             when (obj) {
                 is IntArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Int
                     }
                 }
 
                 is ByteArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Byte
                     }
                 }
 
                 is CharArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Char
                     }
                 }
 
                 is LongArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Long
                     }
                 }
 
                 is FloatArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Float
                     }
                 }
 
                 is ShortArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Short
                     }
                 }
 
                 is DoubleArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Double
                     }
                 }
 
                 is BooleanArray -> {
-                    assert(elemType.notTracked)
+                    check(elemType.notTracked)
                     for ((index, value) in contents) {
                         obj[index] = value as Boolean
                     }
@@ -899,7 +901,7 @@ private class JcConcreteMemoryBindings(
     fun writeMapLength(address: UConcreteHeapAddress, length: Int): Boolean {
         val obj = virtToPhys(address)
         obj as Map<Any?, Any?>
-        assert(obj.size == length)
+        check(obj.size == length)
         return true
     }
 
@@ -936,42 +938,42 @@ private class JcConcreteMemoryBindings(
             val dstArrayElemType = dstArrayType.componentType
             when {
                 srcArray is IntArray && dstArray is IntArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is ByteArray && dstArray is ByteArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is CharArray && dstArray is CharArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is LongArray && dstArray is LongArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is FloatArray && dstArray is FloatArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is ShortArray && dstArray is ShortArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is DoubleArray && dstArray is DoubleArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
                 srcArray is BooleanArray && dstArray is BooleanArray -> {
-                    assert(dstArrayElemType.notTracked)
+                    check(dstArrayElemType.notTracked)
                     srcArray.copyInto(dstArray, fromDstIdx, fromSrcIdx, toSrcIdx)
                 }
 
@@ -1104,7 +1106,7 @@ private class JcConcreteFieldRegion<Sort : USort>(
 
     @Suppress("UNCHECKED_CAST")
     override fun read(key: UFieldLValue<JcField, Sort>): UExpr<Sort> {
-        assert(jcField == key.field)
+        check(jcField == key.field)
         val ref = key.ref
         if (ref is UConcreteHeapRef && bindings.contains(ref.address)) {
             val address = ref.address
@@ -1132,7 +1134,7 @@ private class JcConcreteFieldRegion<Sort : USort>(
         value: UExpr<Sort>,
         guard: UBoolExpr
     ): UMemoryRegion<UFieldLValue<JcField, Sort>, Sort> {
-        assert(jcField == key.field)
+        check(jcField == key.field)
         val ref = key.ref
         if (!isSyntheticClassField && ref is UConcreteHeapRef && bindings.contains(ref.address)) {
             val address = ref.address
@@ -1220,7 +1222,7 @@ private class JcConcreteArrayRegion<Sort : USort>(
                     dstRef.address,
                     fromSrcIdxObj.value as Int,
                     fromDstIdxObj.value as Int,
-                    toDstIdxObj.value as Int
+                    toDstIdxObj.value as Int + 1 // Incrementing 'toDstIdx' index to make it exclusive
                 )
             ) {
                 mutatedArrays.add(dstRef.address)
@@ -2096,6 +2098,10 @@ private class Marshall(
                 }
             }
 
+            expr is UIteExpr && expr.condition.isTrue -> commonTryExprToObj(expr.trueBranch, type, fullyConcrete)
+            expr is UIteExpr && expr.condition.isFalse -> commonTryExprToObj(expr.falseBranch, type, fullyConcrete)
+            expr is UIteExpr -> Maybe.empty()
+
             else -> error("Marshall.commonTryExprToObj: unexpected expression $expr")
         }
     }
@@ -2167,7 +2173,7 @@ private class Marshall(
             val objType = typeOfObject(obj)
             val mostConcreteType = when {
                 objType is JcUnknownType -> type
-                objType != null && objType.isAssignable(type) -> objType
+                objType != null && (objType.isAssignable(type) || type is JcTypeVariable) -> objType
                 else -> type
             }
             address = bindings.allocate(obj, mostConcreteType)!!
@@ -2700,16 +2706,16 @@ class JcConcreteMemory private constructor(
         newRegion: UMemoryRegion<Key, Sort>
     ) {
         when (regionId) {
-            is UFieldsRegionId<*, *> -> assert(newRegion is JcConcreteFieldRegion)
-            is UArrayRegionId<*, *, *> -> assert(newRegion is JcConcreteArrayRegion)
-            is UArrayLengthsRegionId<*, *> -> assert(newRegion is JcConcreteArrayLengthRegion)
+            is UFieldsRegionId<*, *> -> check(newRegion is JcConcreteFieldRegion)
+            is UArrayRegionId<*, *, *> -> check(newRegion is JcConcreteArrayRegion)
+            is UArrayLengthsRegionId<*, *> -> check(newRegion is JcConcreteArrayLengthRegion)
             is UMapRegionId<*, *, *, *> -> error("ConcreteMemory.setRegion: unexpected 'UMapRegionId'")
-            is URefMapRegionId<*, *> -> assert(newRegion is JcConcreteRefMapRegion)
-            is UMapLengthRegionId<*, *> -> assert(newRegion is JcConcreteMapLengthRegion)
+            is URefMapRegionId<*, *> -> check(newRegion is JcConcreteRefMapRegion)
+            is UMapLengthRegionId<*, *> -> check(newRegion is JcConcreteMapLengthRegion)
             is USetRegionId<*, *, *> -> error("ConcreteMemory.setRegion: unexpected 'USetRegionId'")
-            is URefSetRegionId<*> -> assert(newRegion is JcConcreteRefSetRegion)
-            is JcStaticFieldRegionId<*> -> assert(newRegion is JcConcreteStaticFieldsRegion)
-            is JcLambdaCallSiteRegionId -> assert(newRegion is JcConcreteCallSiteLambdaRegion)
+            is URefSetRegionId<*> -> check(newRegion is JcConcreteRefSetRegion)
+            is JcStaticFieldRegionId<*> -> check(newRegion is JcConcreteStaticFieldsRegion)
+            is JcLambdaCallSiteRegionId -> check(newRegion is JcConcreteCallSiteLambdaRegion)
             else -> {
                 super.setRegion(regionId, newRegion)
             }
@@ -2785,7 +2791,7 @@ class JcConcreteMemory private constructor(
 
     override fun tryHeapRefToObject(heapRef: UConcreteHeapRef): Any? {
         val maybe = marshall.tryExprToFullyConcreteObj(heapRef, ctx.cp.objectType)
-        assert(!(maybe.hasValue && maybe.value == null))
+        check(!(maybe.hasValue && maybe.value == null))
         if (maybe.hasValue)
             return maybe.value!!
 
@@ -2794,7 +2800,7 @@ class JcConcreteMemory private constructor(
 
     override fun <Sort: USort> tryExprToInt(expr: UExpr<Sort>): Int? {
         val maybe = marshall.tryExprToFullyConcreteObj(expr, ctx.cp.int)
-        assert(!(maybe.hasValue && maybe.value == null))
+        check(!(maybe.hasValue && maybe.value == null))
         if (maybe.hasValue)
             return maybe.value!! as Int
 
@@ -2860,8 +2866,8 @@ class JcConcreteMemory private constructor(
 
     private fun applyChanges(oldObj: Any, newObj: Any) {
         val type = oldObj.javaClass
-        assert(newObj.javaClass == type)
-        assert(!type.isArray)
+        check(newObj.javaClass == type)
+        check(!type.isArray)
         for (field in type.allInstanceFields) {
             // TODO: reTrack here?
             val childObj = field.getFieldValue(newObj)
@@ -2869,10 +2875,7 @@ class JcConcreteMemory private constructor(
         }
     }
 
-    override fun <Inst, State, Resolver> tryConcreteInvoke(stmt: Inst, state: State, exprResolver: Resolver): Boolean {
-        stmt as JcMethodCall
-        state as JcState
-        exprResolver as JcExprResolver
+    private fun tryConcreteInvoke(stmt: JcMethodCall, state: JcState, exprResolver: JcExprResolver): Boolean {
         val method = stmt.method
         val arguments = stmt.arguments
         if (!methodIsInvokable(method))
@@ -2902,7 +2905,7 @@ class JcConcreteMemory private constructor(
         }
 
         val objParameters = mutableListOf<Any?>()
-        assert(parameterInfos.size == parameters.size)
+        check(parameterInfos.size == parameters.size)
         for (i in parameterInfos.indices) {
             val info = parameterInfos[i]
             val value = parameters[i]
@@ -2913,7 +2916,7 @@ class JcConcreteMemory private constructor(
             objParameters.add(elem.value)
         }
 
-        assert(objParameters.size == parameters.size)
+        check(objParameters.size == parameters.size)
         try {
             if (!shouldInvoke(method)) { // TODO: delete #CM
                 if (!forbiddenInvocations.contains(signature))
@@ -2957,6 +2960,23 @@ class JcConcreteMemory private constructor(
             if (thisObj != null)
                 bindings.reTrackObject(thisObj)
         }
+    }
+
+    override fun <Inst, State, Resolver> tryConcreteInvoke(stmt: Inst, state: State, exprResolver: Resolver): Boolean {
+        stmt as JcMethodCall
+        state as JcState
+        exprResolver as JcExprResolver
+        val success = tryConcreteInvoke(stmt, state, exprResolver)
+        // If constructor was not invoked and memory is not writable, deleting default 'this' from concrete memory:
+        // + No need to encode objects in inconsistent state (created via allocConcrete -- objects with default fields)
+        // - During symbolic execution, 'this' may stay concrete
+        if (!bindings.isWritable && !success && stmt.method.isConstructor) {
+            val thisArg = stmt.arguments[0]
+            if (thisArg is UConcreteHeapRef && bindings.contains(thisArg.address))
+                bindings.remove(thisArg.address)
+        }
+
+        return success
     }
 
     //endregion
@@ -3117,6 +3137,7 @@ class JcConcreteMemory private constructor(
             "runtime.LibSLRuntime\$HashMapContainer#remove(java.lang.Object):void",
             "org.springframework.context.event.SimpleApplicationEventMulticaster#getTaskExecutor():java.util.concurrent.Executor",
             "org.springframework.web.bind.support.SimpleSessionStatus#isComplete():boolean",
+            "org.springframework.web.context.request.async.StandardServletAsyncWebRequest#<init>(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
         )
 
         private val concreteMutatingInvocations = setOf(
@@ -3699,6 +3720,8 @@ class JcConcreteMemory private constructor(
             "java.util.HashMap\$HashIterator#hasNext():boolean",
             "java.util.TreeMap\$PrivateEntryIterator#hasNext():boolean",
             "java.lang.StringBuilder#append(java.lang.Object):java.lang.StringBuilder",
+            "java.util.LinkedHashMap#<init>(int):void",
+            "java.util.concurrent.ConcurrentHashMap#<init>(int):void",
             // TODO: be careful: all methods below are mutating, but maybe it's insufficient #CM
             "org.springframework.web.method.support.HandlerMethodArgumentResolverComposite#supportsParameter(org.springframework.core.MethodParameter):boolean",
             "org.springframework.web.method.support.HandlerMethodArgumentResolverComposite#getArgumentResolver(org.springframework.core.MethodParameter):org.springframework.web.method.support.HandlerMethodArgumentResolver",
