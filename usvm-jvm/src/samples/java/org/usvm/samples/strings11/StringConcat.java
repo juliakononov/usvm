@@ -76,5 +76,19 @@ public class StringConcat {
     public String concatStrangeSymbols() {
         return "\u0000" + '#' + '\u0001' + "!\u0002" + "@\u0012\t";
     }
-}
 
+    public static boolean checkStringBuilder(String s, char c, int i) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(s);
+        String a = "str" + c + i;
+        sb.append(a);
+        String res = sb.toString();
+        if (res.charAt("str".length()) != c)
+            return false;
+
+//        if (i > 0 && i < 128 && res.charAt(s.length() + "str".length() + 1) != i)
+//            return false;
+
+        return true;
+    }
+}

@@ -300,6 +300,7 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "jdk.internal.access")
         openPackage("java.base", "sun.reflect.annotation")
         openPackage("java.base", "sun.nio.cs")
+        openPackage("java.base", "java.nio")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")
         exportPackage("java.base", "jdk.internal.reflect")
