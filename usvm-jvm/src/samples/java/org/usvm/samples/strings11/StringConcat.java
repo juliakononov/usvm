@@ -83,7 +83,7 @@ public class StringConcat {
         String a = "str" + c + i;
         sb.append(a);
         String res = sb.toString();
-        if (res.charAt("str".length()) != c)
+        if (res.charAt(s.length() + "str".length()) != c)
             return false;
 
 //        if (i > 0 && i < 128 && res.charAt(s.length() + "str".length() + 1) != i)
