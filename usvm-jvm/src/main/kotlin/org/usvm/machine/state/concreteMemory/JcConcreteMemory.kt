@@ -2850,7 +2850,7 @@ class JcConcreteMemory private constructor(
                         method.humanReadableSignature.let {
                             it.startsWith("org.usvm") ||
                             it.startsWith("runtime.LibSLRuntime") ||
-                            it.startsWith("generated.")
+                            it.startsWith("generated.") ||
                             it.startsWith("stub.")
                         }
                 )
@@ -3806,6 +3806,7 @@ class JcConcreteMemory private constructor(
             "java.lang.Character#toLowerCase(int):int",
             "java.lang.CharacterData#of(int):java.lang.CharacterData",
             "java.lang.CharacterDataLatin1#toLowerCase(int):int",
+            "java.lang.String#getBytes():byte[]",
             // TODO: be careful: all methods below are mutating, but maybe it's insufficient #CM
             "org.springframework.web.method.support.HandlerMethodArgumentResolverComposite#supportsParameter(org.springframework.core.MethodParameter):boolean",
             "org.springframework.web.method.support.HandlerMethodArgumentResolverComposite#getArgumentResolver(org.springframework.core.MethodParameter):org.springframework.web.method.support.HandlerMethodArgumentResolver",

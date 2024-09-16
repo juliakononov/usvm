@@ -12,6 +12,7 @@ import org.jacodb.api.jvm.cfg.JcRawClassConstant
 import org.jacodb.api.jvm.ext.findClass
 import org.jacodb.api.jvm.ext.toType
 import org.jacodb.approximation.Approximations
+import org.jacodb.impl.JcRamErsSettings
 import org.jacodb.impl.cfg.MethodNodeBuilder
 import org.jacodb.impl.features.InMemoryHierarchy
 import org.jacodb.impl.features.Usages
@@ -89,6 +90,7 @@ val appLocations = hashSetOf<RegisteredLocation>()
 
 private fun loadBench(db: JcDatabase, cpFiles: List<File>, classes: List<File>, dependencies: List<File>) = runBlocking {
     val features = listOf(UnknownClasses)
+    // TODO: features can rewrite methods, use it for Spring.JPA methods rewriting #JPA
     val cp = db.classpathWithApproximations(cpFiles, features)
 //    val cp = db.classpath(cpFiles, features)
 
@@ -111,6 +113,8 @@ private fun loadBenchCp(classes: List<File>, dependencies: List<File>): BenchCp 
 
     val db = jacodb {
         useProcessJavaRuntime()
+
+        persistenceImpl(JcRamErsSettings)
 
         installFeatures(InMemoryHierarchy)
         installFeatures(Usages)
