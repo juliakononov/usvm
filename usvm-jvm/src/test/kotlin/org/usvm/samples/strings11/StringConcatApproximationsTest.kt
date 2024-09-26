@@ -21,7 +21,7 @@ class StringConcatApproximationsTest : ApproximationsTestRunner() {
         checkDiscoveredProperties(
             StringConcat::checkStringBuilder,
             ignoreNumberOfAnalysisResults,
-            { _, _, _, _ -> true }
+            { _, _, _, r -> r == true }
         )
     }
 }

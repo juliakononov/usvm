@@ -2238,14 +2238,16 @@ private class Marshall(
         return runBlocking {
             ctx.cp.hierarchyExt()
                 .findSubClasses(objectEncoderClass, entireHierarchy = true, includeOwn = false)
-                .map { loadEncoder(it) }
+                .mapNotNull { loadEncoder(it) }
                 .toMap()
         }
     }
 
-    private fun loadEncoder(encoder: JcClassOrInterface): Pair<JcClassOrInterface, Any> {
+    private fun loadEncoder(encoder: JcClassOrInterface): Pair<JcClassOrInterface, Any>? {
         val target = encoder.annotation(EncoderFor::class.java.name)!!
-        val targetCls = target.values["value"] as JcClassOrInterface
+        val targetCls = target.values["value"] ?: return null
+
+        targetCls as JcClassOrInterface
 
         val encoderCls = JcConcreteMemoryClassLoader.loadClass(encoder)
         val encoderInstance = encoderCls.getConstructor().newInstance()
