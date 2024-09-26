@@ -188,11 +188,22 @@ abstract class JcTestStateResolver<T>(
     fun resolvePrimitiveChar(expr: UExpr<out USort>): Char =
         extractChar(evaluateInModel(expr)) ?: '\u0000'
 
+    open fun tryCreateObjectInstance(heapRef: UHeapRef): T? {
+        return null
+    }
+
     fun resolveReference(heapRef: UHeapRef, type: JcRefType): T {
         val ref = evaluateInModel(heapRef) as UConcreteHeapRef
         if (ref.address == NULL_ADDRESS) {
             return decoderApi.createNullConst(type)
         }
+
+        val obj = tryCreateObjectInstance(heapRef)
+        if (obj != null) {
+            saveResolvedRef(ref.address, obj)
+            return obj
+        }
+
         // to find a type, we need to understand the source of the object
         val typeStream = if (ref.address <= INITIAL_INPUT_ADDRESS) {
             // input object
@@ -223,7 +234,7 @@ abstract class JcTestStateResolver<T>(
         }
     }
 
-    fun resolveArray(
+    open fun resolveArray(
         ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcArrayType
     ): T {
         val arrayDescriptor = ctx.arrayDescriptorOf(type)
@@ -248,7 +259,7 @@ abstract class JcTestStateResolver<T>(
 
     abstract fun allocateClassInstance(type: JcClassType): T
 
-    fun resolveObject(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcClassType): T {
+    open fun resolveObject(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcClassType): T {
         val decoder = decoders.findDecoder(type.jcClass)
         if (decoder != null) {
             return decodeObject(ref, type, decoder)
@@ -304,7 +315,8 @@ abstract class JcTestStateResolver<T>(
                 // No need to process other superclasses since we already decode them
                 break
             } else {
-                val fields = cls.declaredFields.filter { !it.isStatic }
+                // TODO: think about it! #CM
+                val fields = cls.declaredFields.filterNot { it.isStatic || cls.isAbstract && it.field is JcEnrichedVirtualField }
 
                 for (field in fields) {
                     check(field.field !is JcEnrichedVirtualField) {

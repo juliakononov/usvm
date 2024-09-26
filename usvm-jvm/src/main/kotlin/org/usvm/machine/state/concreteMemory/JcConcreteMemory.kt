@@ -1,12 +1,12 @@
 package org.usvm.machine.state.concreteMemory
 
-import com.jetbrains.rd.util.Callable
 import io.ksmt.expr.KBitVec16Value
 import io.ksmt.expr.KBitVec32Value
 import io.ksmt.expr.KBitVec64Value
 import io.ksmt.expr.KBitVec8Value
 import io.ksmt.expr.KFp32Value
 import io.ksmt.expr.KFp64Value
+import io.ksmt.utils.asExpr
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.coroutines.runBlocking
@@ -27,6 +27,7 @@ import org.jacodb.api.jvm.ext.char
 import org.jacodb.api.jvm.ext.double
 import org.jacodb.api.jvm.ext.findClass
 import org.jacodb.api.jvm.ext.findClassOrNull
+import org.jacodb.api.jvm.ext.findFieldOrNull
 import org.jacodb.api.jvm.ext.findType
 import org.jacodb.api.jvm.ext.findTypeOrNull
 import org.jacodb.api.jvm.ext.float
@@ -63,7 +64,12 @@ import org.usvm.api.SymbolicList
 import org.usvm.api.SymbolicMap
 import org.usvm.api.encoder.EncoderFor
 import org.usvm.api.encoder.ObjectEncoder
+import org.usvm.api.readArrayIndex
+import org.usvm.api.readField
 import org.usvm.api.util.JcConcreteMemoryClassLoader
+import org.usvm.api.util.JcTestInterpreterDecoderApi
+import org.usvm.api.util.JcTestStateResolver
+import org.usvm.api.util.JcTestStateResolver.ResolveMode
 import org.usvm.api.util.Reflection.allocateInstance
 import org.usvm.api.util.Reflection.getFieldValue
 import org.usvm.api.util.Reflection.invoke
@@ -127,6 +133,7 @@ import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.util.LinkedList
 import java.util.Queue
+import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
@@ -161,14 +168,16 @@ private data class PhysicalAddress(
 private interface ChildKind
 
 private data class FieldChildKind(
-    private val field: Field
+    val field: Field
 ) : ChildKind
 
 private data class ArrayIndexChildKind(
-    private val index: Int,
+    val index: Int,
 ) : ChildKind
 
 //endregion
+
+//region Cell
 
 private data class Cell(
     val address: PhysicalAddress?
@@ -182,6 +191,10 @@ private data class Cell(
         }
     }
 }
+
+//endregion
+
+//region Helpers And Extensions
 
 @Suppress("RecursivePropertyAccessor")
 private val JcClassType.allFields: List<JcTypedField>
@@ -219,6 +232,38 @@ private fun Field.setFieldValue(obj: Any, value: Any?) {
     set(obj, value)
 }
 
+@Suppress("UNCHECKED_CAST")
+private fun <Value> Any.getArrayValue(index: Int): Value {
+    return when (this) {
+        is IntArray -> this[index] as Value
+        is ByteArray -> this[index] as Value
+        is CharArray -> this[index] as Value
+        is LongArray -> this[index] as Value
+        is FloatArray -> this[index] as Value
+        is ShortArray -> this[index] as Value
+        is DoubleArray -> this[index] as Value
+        is BooleanArray -> this[index] as Value
+        is Array<*> -> this[index] as Value
+        else -> error("getArrayValue: unexpected array $this")
+    }
+}
+
+@Suppress("UNCHECKED_CAST")
+private fun <Value> Any.setArrayValue(index: Int, value: Value) {
+    when (this) {
+        is IntArray -> this[index] = value as Int
+        is ByteArray -> this[index] = value as Byte
+        is CharArray -> this[index] = value as Char
+        is LongArray -> this[index] = value as Long
+        is FloatArray -> this[index] = value as Float
+        is ShortArray -> this[index] = value as Short
+        is DoubleArray -> this[index] = value as Double
+        is BooleanArray -> this[index] = value as Boolean
+        is Array<*> -> (this as Array<Value>)[index] = value
+        else -> error("setArrayValue: unexpected array $this")
+    }
+}
+
 private val JcField.toJavaField: Field?
     get() = enclosingClass.toType().toJavaClass(JcConcreteMemoryClassLoader).allFields.find { it.name == name }
 
@@ -231,6 +276,79 @@ private fun JcEnrichedVirtualMethod.getMethod(ctx: JcContext): JcMethod? {
         ?.declaredMethods
         ?.find { it.name == this.name }
 }
+
+@Suppress("RecursivePropertyAccessor")
+private val JcType.isEnum: Boolean
+    get() = this is JcClassType && (this.jcClass.isEnum || this.superType?.isEnum == true)
+
+private val JcType.isEnumArray: Boolean
+    get() = this is JcArrayType && this.elementType.let { it is JcClassType && it.jcClass.isEnum }
+
+private val JcType.internalName: String
+    get() = if (this is JcClassType) this.name else this.typeName
+
+private val notTrackedTypes = setOf(
+    "java.lang.Class",
+)
+
+private val Class<*>.isProxy: Boolean
+    get() = Proxy.isProxyClass(this)
+
+private val Class<*>.isLambda: Boolean
+    get() = typeName.contains('/') && typeName.contains("\$\$Lambda\$")
+
+private val Class<*>.notTracked: Boolean
+    get() =
+        this.isPrimitive ||
+                this.isEnum ||
+                notTrackedTypes.contains(this.name)
+
+private val JcType.notTracked: Boolean
+    get() =
+        this is JcPrimitiveType ||
+                this is JcClassType &&
+                (this.jcClass.isEnum || notTrackedTypes.contains(this.name))
+
+private val immutableTypes = setOf(
+    "java.lang.Integer",
+    "java.lang.Byte",
+    "java.lang.Short",
+    "java.lang.Long",
+    "java.lang.Float",
+    "java.lang.Double",
+    "java.lang.Boolean",
+    "java.lang.Character",
+    "java.lang.String",
+    "jdk.internal.loader.ClassLoaders\$AppClassLoader",
+    "java.security.AllPermission",
+    "java.net.NetPermission",
+    "java.lang.reflect.Method",
+    "java.lang.Class",
+)
+
+private val Class<*>.isImmutable: Boolean
+    get() = immutableTypes.contains(this.name) || ClassLoader::class.java.isAssignableFrom(this)
+
+private val JcType.isImmutable: Boolean
+    get() = this is JcClassType && immutableTypes.contains(this.name)
+
+private val Class<*>.isSolid: Boolean
+    get() =
+        notTracked ||
+                immutableTypes.contains(this.name) ||
+                this.isArray && this.componentType.notTracked
+
+private val JcType.isSolid: Boolean
+    get() =
+        notTracked ||
+                this is JcClassType && immutableTypes.contains(this.name) ||
+                this is JcArrayType && this.elementType.notTracked
+
+private fun Class<*>.toJcType(ctx: JcContext): JcType? {
+    return ctx.cp.findTypeOrNull(this.typeName)
+}
+
+//endregion
 
 private typealias childMapType = MutableMap<ChildKind, Cell>
 private typealias childrenType = MutableMap<PhysicalAddress, childMapType>
@@ -249,6 +367,7 @@ private class JcConcreteMemoryBindings(
     private val parents: MutableMap<PhysicalAddress, parentMapType>,
     private val fullyConcretes: MutableSet<PhysicalAddress>,
     private val newAddresses: MutableSet<UConcreteHeapAddress>,
+    private val backtrackChanges: MutableMap<PhysicalAddress, PhysicalAddress>,
 ) {
     constructor(
         ctx: JcContext,
@@ -263,25 +382,12 @@ private class JcConcreteMemoryBindings(
         mutableMapOf(),
         mutableSetOf(),
         mutableSetOf(),
+        mutableMapOf(),
     )
 
     init {
         JcConcreteMemoryClassLoader.cp = ctx.cp
     }
-
-    //region Helpers
-
-    @Suppress("RecursivePropertyAccessor")
-    private val JcType.isEnum: Boolean
-        get() = this is JcClassType && (this.jcClass.isEnum || this.superType?.isEnum == true)
-
-    private val JcType.isEnumArray: Boolean
-        get() = this is JcArrayType && this.elementType.let { it is JcClassType && it.jcClass.isEnum }
-
-    private val JcType.internalName: String
-        get() = if (this is JcClassType) this.name else this.typeName
-
-    //endregion
 
     //region Primitives
 
@@ -401,6 +507,7 @@ private class JcConcreteMemoryBindings(
     }
 
     private fun checkConcretenessRec(phys: PhysicalAddress, tracked: MutableSet<PhysicalAddress>): Boolean {
+        // TODO: cache not fully concrete objects #CM
         if (fullyConcretes.contains(phys) || !tracked.add(phys))
             return true
 
@@ -416,47 +523,6 @@ private class JcConcreteMemoryBindings(
 
         return allConcrete
     }
-
-    private val notTrackedTypes = setOf("java.lang.Class")
-
-    private val Class<*>.notTracked: Boolean
-        get() =
-            this.isPrimitive ||
-                    this.isEnum ||
-                    notTrackedTypes.contains(this.name)
-
-    private val JcType.notTracked: Boolean
-        get() =
-            this is JcPrimitiveType ||
-                    this is JcClassType &&
-                    (this.jcClass.isEnum || notTrackedTypes.contains(this.name))
-
-    private val solidTypes = setOf(
-        "java.lang.Integer",
-        "java.lang.Byte",
-        "java.lang.Short",
-        "java.lang.Long",
-        "java.lang.Float",
-        "java.lang.Double",
-        "java.lang.Boolean",
-        "java.lang.Character",
-        "jdk.internal.loader.ClassLoaders\$AppClassLoader",
-        "java.security.AllPermission",
-        "java.net.NetPermission",
-        "java.lang.reflect.Method",
-    )
-
-    private val Class<*>.isSolid: Boolean
-        get() =
-            notTracked ||
-                    solidTypes.contains(this.name) ||
-                    this.isArray && this.componentType.notTracked
-
-    private val JcType.isSolid: Boolean
-        get() =
-            notTracked ||
-                    this is JcClassType && solidTypes.contains(this.name) ||
-                    this is JcArrayType && this.elementType.notTracked
 
     fun reTrackObject(obj: Any?) {
         if (obj == null)
@@ -545,6 +611,19 @@ private class JcConcreteMemoryBindings(
             val parent = it.key
             children[parent]!![it.value] = Cell()
         }
+    }
+
+    fun symbolicMembers(address: UConcreteHeapAddress): List<ChildKind> {
+        check(virtToPhys.contains(address))
+        val phys = virtToPhys[address]!!
+        val symbolicMembers = mutableListOf<ChildKind>()
+        children[phys]?.forEach {
+            val child = it.value.address
+            if (child == null || !checkConcreteness(child))
+                symbolicMembers.add(it.key)
+        }
+
+        return symbolicMembers
     }
 
     //endregion
@@ -768,22 +847,10 @@ private class JcConcreteMemoryBindings(
         return isWritable
     }
 
-    @Suppress("UNCHECKED_CAST")
     fun <Value> writeArrayIndex(address: UConcreteHeapAddress, index: Int, value: Value): Boolean {
         if (isWritable) {
             val obj = virtToPhys(address)
-            when (obj) {
-                is IntArray -> obj[index] = value as Int
-                is ByteArray -> obj[index] = value as Byte
-                is CharArray -> obj[index] = value as Char
-                is LongArray -> obj[index] = value as Long
-                is FloatArray -> obj[index] = value as Float
-                is ShortArray -> obj[index] = value as Short
-                is DoubleArray -> obj[index] = value as Double
-                is BooleanArray -> obj[index] = value as Boolean
-                is Array<*> -> (obj as Array<Value>)[index] = value
-                else -> error("JcConcreteMemoryBindings.writeArrayIndex: unexpected array $obj")
-            }
+            obj.setArrayValue(index, value)
 
             val arrayType = typeConstraints.typeOf(address)
             arrayType as JcArrayType
@@ -1021,6 +1088,160 @@ private class JcConcreteMemoryBindings(
 
     //endregion
 
+    //region Backtracking
+
+    private fun cloneObject(obj: Any): Any {
+        val type = obj.javaClass
+        val jcType = type.toJcType(ctx) ?: return obj
+        when {
+            type.isImmutable -> return obj
+            // TODO: clone lambda and maybe proxy #CM
+            type.isProxy || type.isLambda -> return obj
+            jcType is JcArrayType -> {
+                return when (obj) {
+                    is IntArray -> obj.clone()
+                    is ByteArray -> obj.clone()
+                    is CharArray -> obj.clone()
+                    is LongArray -> obj.clone()
+                    is FloatArray -> obj.clone()
+                    is ShortArray -> obj.clone()
+                    is DoubleArray -> obj.clone()
+                    is BooleanArray -> obj.clone()
+                    is Array<*> -> obj.clone()
+                    else -> error("cloneObject: unexpected array $obj")
+                }
+            }
+            jcType is JcClassType -> {
+                try {
+                    val newObj = jcType.allocateInstance(JcConcreteMemoryClassLoader)
+                    for (field in type.allInstanceFields) {
+                        val value = field.getFieldValue(obj)
+                        field.setFieldValue(newObj, value)
+                    }
+                    return newObj
+                } catch (e: Exception) {
+                    println("cloneObject failed on class ${type.name}")
+                    return obj
+                }
+            }
+            else -> return obj
+        }
+    }
+
+    fun addObjectToBacktrack(obj: Any) {
+        val type = obj.javaClass
+        if (type.isImmutable)
+            return
+
+        val oldPhys = PhysicalAddress(obj)
+        val clonedPhys = PhysicalAddress(cloneObject(obj))
+        backtrackChanges[oldPhys] = clonedPhys
+    }
+
+    fun addObjectToBacktrackRec(obj: Any) {
+        val queue: Queue<Any?> = LinkedList()
+        queue.add(obj)
+        while (queue.isNotEmpty()) {
+            val current = queue.poll() ?: continue
+            if (backtrackChanges.containsKey(PhysicalAddress(current)))
+                continue
+
+            addObjectToBacktrack(current)
+            val type = current.javaClass
+            when {
+                type.isImmutable -> continue
+                type.isArray && current is Array<*> -> queue.addAll(current)
+                else -> {
+                    for (field in type.allInstanceFields) {
+                        try {
+                            queue.add(field.getFieldValue(current))
+                        } catch (e: Throwable) {
+                            println("addObjectToBacktrackRec failed on class ${type.name}")
+                            continue
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun applyBacktrack() {
+        for ((oldPhys, clonedPhys) in backtrackChanges) {
+            val oldObj = oldPhys.obj ?: continue
+            val obj = clonedPhys.obj ?: continue
+            val type = obj.javaClass
+            check(oldObj.javaClass == type)
+            when {
+                type.isImmutable -> continue
+                type.isArray -> {
+                    when {
+                        obj is IntArray && oldObj is IntArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is ByteArray && oldObj is ByteArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is CharArray && oldObj is CharArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is LongArray && oldObj is LongArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is FloatArray && oldObj is FloatArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is ShortArray && oldObj is ShortArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is DoubleArray && oldObj is DoubleArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is BooleanArray && oldObj is BooleanArray -> {
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        obj is Array<*> && oldObj is Array<*> -> {
+                            oldObj as Array<Any?>
+                            obj.forEachIndexed { i, v ->
+                                oldObj[i] = v
+                            }
+                        }
+                        else -> error("applyBacktrack: unexpected array $obj")
+                    }
+                }
+
+                else -> {
+                    for (field in type.allInstanceFields) {
+                        try {
+                            val value = field.getFieldValue(obj)
+                            field.setFieldValue(oldObj, value)
+                        } catch (e: Exception) {
+                            error("applyBacktrack class ${type.name} failed on field ${field.name}, cause: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    //endregion
+
     //region Removing
 
     fun remove(address: UConcreteHeapAddress) {
@@ -1053,6 +1274,11 @@ private class JcConcreteMemoryBindings(
         return newParents
     }
 
+    private fun copyBacktrackChanges(): MutableMap<PhysicalAddress, PhysicalAddress> {
+        check(backtrackChanges.isEmpty())
+        return backtrackChanges.toMutableMap();
+    }
+
     fun copy(typeConstraints: UTypeConstraints<JcType>): JcConcreteMemoryBindings {
         newAddresses.clear()
         return JcConcreteMemoryBindings(
@@ -1065,6 +1291,7 @@ private class JcConcreteMemoryBindings(
             copyParents(),
             fullyConcretes.toMutableSet(),
             mutableSetOf(),
+            copyBacktrackChanges(),
         )
     }
 
@@ -2138,7 +2365,7 @@ private class Marshall(
             val objJavaClass = obj.javaClass
             val typeName = objJavaClass.typeName
 
-            if (Proxy.isProxyClass(objJavaClass)) {
+            if (objJavaClass.isProxy) {
                 val interfaces = objJavaClass.interfaces
                 if (interfaces.size == 1)
                     return ctx.cp.findType(interfaces[0].typeName)
@@ -2146,7 +2373,7 @@ private class Marshall(
                 return null
             }
 
-            if (typeName.contains('/') && typeName.contains("\$\$Lambda\$")) {
+            if (objJavaClass.isLambda) {
                 val db = ctx.cp.db
                 val vfs = db.javaClass.allInstanceFields.find { it.name == "classesVfs" }!!.getFieldValue(db)!!
                 val loc = ctx.cp.registeredLocations.find { it.jcLocation?.jarOrFolder?.absolutePath?.startsWith("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes") == true }!!
@@ -2626,6 +2853,8 @@ class JcConcreteMemory private constructor(
 
     private val marshall: Marshall by lazy { marshallVar!! }
 
+    private var concretization = false
+
     //region 'JcConcreteRegionGetter' implementation
 
     @Suppress("UNCHECKED_CAST")
@@ -2815,6 +3044,8 @@ class JcConcreteMemory private constructor(
     }
 
     override fun clone(typeConstraints: UTypeConstraints<JcType>): UMemory<JcType, JcMethod> {
+        check(!concretization)
+
         bindings.makeNonWritable()
         println(ansiBlue + "Concrete memory is non writable!" + ansiReset)
         val stack = stack.clone()
@@ -2877,6 +3108,181 @@ class JcConcreteMemory private constructor(
         }
     }
 
+    private inner class JcConcretizer(
+        state: JcState
+    ) : JcTestStateResolver<Any?>(state.ctx, state.models.first(), state.memory, state.callStack.lastMethod().enclosingClass.toType().declaredMethods.first()) {
+        override val decoderApi: JcTestInterpreterDecoderApi = JcTestInterpreterDecoderApi(ctx, JcConcreteMemoryClassLoader)
+
+        override fun tryCreateObjectInstance(heapRef: UHeapRef): Any? {
+            if (heapRef !is UConcreteHeapRef)
+                return null
+
+            val address = heapRef.address
+            val obj = bindings.tryFullyConcrete(address)
+            if (obj != null)
+                bindings.addObjectToBacktrackRec(obj)
+
+            return obj
+        }
+
+        private fun resolveConcreteArray(ref: UConcreteHeapRef, type: JcArrayType): Any {
+            val address = ref.address
+            val obj = bindings.virtToPhys(address)
+            // TODO: optimize #CM
+            bindings.addObjectToBacktrackRec(obj)
+            val elementType = type.elementType
+            val elementSort = ctx.typeToSort(type.elementType)
+            val arrayDescriptor = ctx.arrayDescriptorOf(type)
+            for (kind in bindings.symbolicMembers(address)) {
+                check(kind is ArrayIndexChildKind)
+                val index = kind.index
+                val value = readArrayIndex(ref, ctx.mkSizeExpr(index), arrayDescriptor, elementSort)
+                val resolved = resolveExpr(value, elementType)
+                obj.setArrayValue(index, resolved)
+            }
+
+            return obj
+        }
+
+        override fun resolveArray(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcArrayType): Any? {
+            if (heapRef is UConcreteHeapRef && bindings.contains(heapRef.address)) {
+                val array = resolveConcreteArray(heapRef, type)
+                saveResolvedRef(ref.address, array)
+                return array
+            }
+
+            return super.resolveArray(ref, heapRef, type)
+        }
+
+        private fun resolveConcreteObject(ref: UConcreteHeapRef, type: JcClassType): Any {
+            val address = ref.address
+            val obj = bindings.virtToPhys(address)
+            // TODO: optimize #CM
+            bindings.addObjectToBacktrackRec(obj)
+            for (kind in bindings.symbolicMembers(address)) {
+                check(kind is FieldChildKind)
+                val field = kind.field
+                val jcField = type.findFieldOrNull(field.name)
+                    ?: error("resolveConcreteObject: can not find field $field")
+                val fieldType = jcField.type
+                val fieldSort = ctx.typeToSort(fieldType)
+                val value = readField(ref, jcField, fieldSort)
+                val resolved = resolveExpr(value, fieldType)
+                field.setFieldValue(obj, resolved)
+            }
+
+            return obj
+        }
+
+        override fun resolveObject(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcClassType): Any? {
+            if (heapRef is UConcreteHeapRef && bindings.contains(heapRef.address)) {
+                val obj = resolveConcreteObject(heapRef, type)
+                saveResolvedRef(ref.address, obj)
+                return obj
+            }
+
+            return super.resolveObject(ref, heapRef, type)
+        }
+
+        override fun allocateClassInstance(type: JcClassType): Any =
+            type.allocateInstance(JcConcreteMemoryClassLoader)
+
+        override fun allocateString(value: Any?): Any = when (value) {
+            is CharArray -> String(value)
+            is ByteArray -> String(value)
+            else -> String()
+        }
+    }
+
+    private fun concretize(
+        state: JcState,
+        exprResolver: JcExprResolver,
+        stmt: JcMethodCall,
+        method: JcMethod,
+    ) {
+        // TODO: (1) clone recursively each object and remember it
+        // TODO: (2) mutate and concretize old object
+        // TODO: (3) finish current state: add new path selector (after concretization it will finish current path)
+        // TODO: (4) roll back changes after path finish via remembered objects
+        concretization = true
+        val concretizer = JcConcretizer(state)
+        val parameterInfos = method.parameters
+        var parameters = stmt.arguments
+        val isStatic = method.isStatic
+        var thisObj: Any? = null
+        val objParameters = mutableListOf<Any?>()
+
+        if (!isStatic) {
+            val thisType = method.enclosingClass.toType()
+            thisObj =
+                concretizer.withMode(ResolveMode.CURRENT) {
+                    resolveReference(parameters[0].asExpr(ctx.addressSort), thisType)
+                }
+            parameters = parameters.drop(1)
+        }
+
+        check(parameterInfos.size == parameters.size)
+        for (i in parameterInfos.indices) {
+            val info = parameterInfos[i]
+            val value = parameters[i]
+            val type = ctx.cp.findTypeOrNull(info.type)!!
+            val elem =
+                concretizer.withMode(ResolveMode.CURRENT) {
+                    resolveExpr(value, type)
+                }
+            objParameters.add(elem)
+        }
+
+        check(objParameters.size == parameters.size)
+        println(ansiGreen + "Concretizing ${method.humanReadableSignature}" + ansiReset)
+        invoke(state, exprResolver, stmt, method, thisObj, objParameters)
+    }
+
+    private fun invoke(
+        state: JcState,
+        exprResolver: JcExprResolver,
+        stmt: JcMethodCall,
+        method: JcMethod,
+        thisObj: Any?,
+        objParameters: List<Any?>
+    ) {
+        try {
+            val future = executor.submit(Callable { method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters) })
+            val resultObj: Any?
+            try {
+                try {
+                    resultObj = future.get()
+                } catch (e: ExecutionException) {
+                    val cause = e.cause
+                    if (cause != null)
+                        throw cause
+                    else throw e
+                }
+            } catch (e: InvocationTargetException) {
+                throw e.targetException
+            }
+
+            println("Result $resultObj")
+            if (method.isConstructor)
+                applyChanges(thisObj!!, resultObj!!)
+            val returnType = ctx.cp.findTypeOrNull(method.returnType)!!
+            val result: UExpr<USort> = marshall.objToExpr(resultObj, returnType)
+            exprResolver.ensureExprCorrectness(result, returnType)
+            state.newStmt(JcConcreteInvocationResult(result, stmt))
+        } catch (e: Throwable) {
+            val jcType = ctx.jcTypeOf(e)
+            println("Exception ${e.javaClass} with message ${e.message}")
+            val exception = allocateObject(e, jcType)
+            state.throwExceptionWithoutStackFrameDrop(exception, jcType)
+        } finally {
+            objParameters.forEach {
+                bindings.reTrackObject(it)
+            }
+            if (thisObj != null)
+                bindings.reTrackObject(thisObj)
+        }
+    }
+
     private fun tryConcreteInvoke(stmt: JcMethodCall, state: JcState, exprResolver: JcExprResolver): Boolean {
         val method = stmt.method
         val arguments = stmt.arguments
@@ -2884,6 +3290,12 @@ class JcConcreteMemory private constructor(
             return false
 
         val signature = method.humanReadableSignature
+
+        if (concretizeInvocations.contains(signature) || concretization && !forbiddenInvocations.contains(signature)) {
+            concretize(state, exprResolver, stmt, method)
+            return true
+        }
+
         if (!bindings.isWritable && concreteMutatingInvocations.contains(signature)) {
             // TODO: delete (!shouldInvoke(signature) will do the thing) #CM
             return false
@@ -2919,49 +3331,15 @@ class JcConcreteMemory private constructor(
         }
 
         check(objParameters.size == parameters.size)
-        try {
-            if (!shouldInvoke(method)) { // TODO: delete #CM
-                if (!forbiddenInvocations.contains(signature))
-                    println(ansiYellow + "Can be added $signature" + ansiReset)
-                return false
-            }
-            println(ansiGreen + "Invoking $signature" + ansiReset)
-            val future = executor.submit(Callable { method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters) })
-            val resultObj: Any?
-            try {
-                try {
-                    resultObj = future.get()
-                } catch (e: ExecutionException) {
-                    val cause = e.cause
-                    if (cause != null)
-                        throw cause
-                    else throw e
-                }
-            } catch (e: InvocationTargetException) {
-                throw e.targetException
-            }
-
-            println("Result $resultObj")
-            if (method.isConstructor)
-                applyChanges(thisObj!!, resultObj!!)
-            val returnType = ctx.cp.findTypeOrNull(method.returnType)!!
-            val result: UExpr<USort> = marshall.objToExpr(resultObj, returnType)
-            exprResolver.ensureExprCorrectness(result, returnType)
-            state.newStmt(JcConcreteInvocationResult(result, stmt))
-            return true
-        } catch (e: Throwable) {
-            val jcType = ctx.jcTypeOf(e)
-            println("Exception ${e.javaClass} with message ${e.message}")
-            val exception = allocateObject(e, jcType)
-            state.throwExceptionWithoutStackFrameDrop(exception, jcType)
-            return true
-        } finally {
-            objParameters.forEach {
-                bindings.reTrackObject(it)
-            }
-            if (thisObj != null)
-                bindings.reTrackObject(thisObj)
+        if (!shouldInvoke(method)) { // TODO: delete #CM
+            if (!forbiddenInvocations.contains(signature))
+                println(ansiYellow + "Can be added $signature" + ansiReset)
+            return false
         }
+        println(ansiGreen + "Invoking $signature" + ansiReset)
+        invoke(state, exprResolver, stmt, method, thisObj, objParameters)
+
+        return true
     }
 
     override fun <Inst, State, Resolver> tryConcreteInvoke(stmt: Inst, state: State, exprResolver: Resolver): Boolean {
@@ -3840,6 +4218,10 @@ class JcConcreteMemory private constructor(
             "java.lang.System#registerNatives():void",
             // TODO: not sure, that this can be invoked! #CM
             "org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory#autowireBeanProperties(java.lang.Object,int,boolean):void",
+        )
+
+        private val concretizeInvocations = setOf(
+            "org.springframework.test.web.servlet.TestDispatcherServlet#render(org.springframework.web.servlet.ModelAndView,jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
         )
 
         //endregion
