@@ -1091,6 +1091,11 @@ private class JcConcreteMemoryBindings(
     //region Backtracking
 
     private fun cloneObject(obj: Any): Any {
+        // TODO: (1) do not clone java.lang and java.lang.reflect
+        // TODO: (2) do not clone Proxy and Lambda, but go to it's children and clone them (closure)
+        // TODO: (3) do not clone ByteBuffer (mapping on memory)
+        // TODO: (4) do not clone objects with no fields
+        // TODO: (5) use getFieldValue and setFieldValue from instrumentation.Reflection
         val type = obj.javaClass
         val jcType = type.toJcType(ctx) ?: return obj
         when {
@@ -2608,9 +2613,9 @@ private class Marshall(
     //region Encoding
 
     fun encode(address: UConcreteHeapAddress) {
-        println("encoding for $address")
         val obj = bindings.virtToPhys(address)
         val type = bindings.typeOf(address) as JcClassType
+        println("encoding for $address of type $type")
         var encoder: Any? = null
         var jcClass: JcClassOrInterface? = type.jcClass
         var searchingEncoder = true
@@ -2619,8 +2624,7 @@ private class Marshall(
             searchingEncoder = encoder == null
             jcClass = if (searchingEncoder) jcClass.superClass else jcClass
         }
-        encoder ?:
-            error("Failed to find encoder for type ${type.name}")
+        encoder ?: error("Failed to find encoder for type ${type.name}")
         val encodeMethod = encoder.javaClass.declaredMethods.find { it.name == "encode" }!!
         val approximatedObj = try {
             encodeMethod.invoke(encoder, obj)
@@ -3099,23 +3103,20 @@ class JcConcreteMemory private constructor(
                 )
     }
 
-    private fun applyChanges(oldObj: Any, newObj: Any) {
-        val type = oldObj.javaClass
-        check(newObj.javaClass == type)
-        check(!type.isArray)
-        for (field in type.allInstanceFields) {
-            // TODO: reTrack here?
-            val childObj = field.getFieldValue(newObj)
-            field.setFieldValue(oldObj, childObj)
-        }
-    }
-
     private inner class JcConcretizer(
         state: JcState
     ) : JcTestStateResolver<Any?>(state.ctx, state.models.first(), state.memory, state.callStack.lastMethod().enclosingClass.toType().declaredMethods.first()) {
         override val decoderApi: JcTestInterpreterDecoderApi = JcTestInterpreterDecoderApi(ctx, JcConcreteMemoryClassLoader)
 
-        override fun tryCreateObjectInstance(heapRef: UHeapRef): Any? {
+        override fun tryCreateObjectInstance(ref: UConcreteHeapRef, heapRef: UHeapRef): Any? {
+            val addressInModel = ref.address
+
+            if (bindings.contains(addressInModel)) {
+                val obj = bindings.tryFullyConcrete(addressInModel)
+                check(obj != null)
+                return obj
+            }
+
             if (heapRef !is UConcreteHeapRef)
                 return null
 
@@ -3147,13 +3148,20 @@ class JcConcreteMemory private constructor(
         }
 
         override fun resolveArray(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcArrayType): Any? {
+            val addressInModel = ref.address
             if (heapRef is UConcreteHeapRef && bindings.contains(heapRef.address)) {
                 val array = resolveConcreteArray(heapRef, type)
-                saveResolvedRef(ref.address, array)
+                saveResolvedRef(addressInModel, array)
                 return array
             }
 
-            return super.resolveArray(ref, heapRef, type)
+            val array = super.resolveArray(ref, heapRef, type)
+            if (array != null && !bindings.contains(addressInModel)) {
+                types.remove(addressInModel)
+                bindings.allocate(addressInModel, array, type)
+            }
+
+            return array
         }
 
         private fun resolveConcreteObject(ref: UConcreteHeapRef, type: JcClassType): Any {
@@ -3177,13 +3185,20 @@ class JcConcreteMemory private constructor(
         }
 
         override fun resolveObject(ref: UConcreteHeapRef, heapRef: UHeapRef, type: JcClassType): Any? {
+            val addressInModel = ref.address
             if (heapRef is UConcreteHeapRef && bindings.contains(heapRef.address)) {
                 val obj = resolveConcreteObject(heapRef, type)
-                saveResolvedRef(ref.address, obj)
+                saveResolvedRef(addressInModel, obj)
                 return obj
             }
 
-            return super.resolveObject(ref, heapRef, type)
+            val obj = super.resolveObject(ref, heapRef, type)
+            if (obj != null && !bindings.contains(addressInModel)) {
+                types.remove(addressInModel)
+                bindings.allocate(addressInModel, obj, type)
+            }
+
+            return obj
         }
 
         override fun allocateClassInstance(type: JcClassType): Any =
@@ -3248,6 +3263,7 @@ class JcConcreteMemory private constructor(
         thisObj: Any?,
         objParameters: List<Any?>
     ) {
+        var thisArg = thisObj
         try {
             val future = executor.submit(Callable { method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters) })
             val resultObj: Any?
@@ -3265,8 +3281,16 @@ class JcConcreteMemory private constructor(
             }
 
             println("Result $resultObj")
-            if (method.isConstructor)
-                applyChanges(thisObj!!, resultObj!!)
+            if (method.isConstructor) {
+                val thisAddress = bindings.tryPhysToVirt(thisObj!!)
+                check(thisAddress != null)
+                thisArg = resultObj
+                val type = bindings.typeOf(thisAddress)
+                bindings.remove(thisAddress)
+                types.remove(thisAddress)
+                bindings.allocate(thisAddress, resultObj!!, type)
+            }
+
             val returnType = ctx.cp.findTypeOrNull(method.returnType)!!
             val result: UExpr<USort> = marshall.objToExpr(resultObj, returnType)
             exprResolver.ensureExprCorrectness(result, returnType)
@@ -3281,7 +3305,7 @@ class JcConcreteMemory private constructor(
                 bindings.reTrackObject(it)
             }
             if (thisObj != null)
-                bindings.reTrackObject(thisObj)
+                bindings.reTrackObject(thisArg)
         }
     }
 

@@ -188,7 +188,7 @@ abstract class JcTestStateResolver<T>(
     fun resolvePrimitiveChar(expr: UExpr<out USort>): Char =
         extractChar(evaluateInModel(expr)) ?: '\u0000'
 
-    open fun tryCreateObjectInstance(heapRef: UHeapRef): T? {
+    open fun tryCreateObjectInstance(ref: UConcreteHeapRef, heapRef: UHeapRef): T? {
         return null
     }
 
@@ -198,7 +198,7 @@ abstract class JcTestStateResolver<T>(
             return decoderApi.createNullConst(type)
         }
 
-        val obj = tryCreateObjectInstance(heapRef)
+        val obj = tryCreateObjectInstance(ref, heapRef)
         if (obj != null) {
             saveResolvedRef(ref.address, obj)
             return obj

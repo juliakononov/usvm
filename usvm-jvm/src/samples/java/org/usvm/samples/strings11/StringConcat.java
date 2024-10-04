@@ -78,6 +78,9 @@ public class StringConcat {
     }
 
     public static boolean checkStringBuilder(String s, char c, int i) {
+        if (s == null)
+            return true;
+
         StringBuilder sb = new StringBuilder();
         sb.append(s);
         String a = "str" + c + i;
@@ -86,8 +89,8 @@ public class StringConcat {
         if (res.charAt(s.length() + "str".length()) != c)
             return false;
 
-//        if (i > 0 && i < 128 && res.charAt(s.length() + "str".length() + 1) != i)
-//            return false;
+        if (i > 0 && i < 128 && res.charAt(s.length() + "str".length() + 1) != i)
+            return false;
 
         return true;
     }
