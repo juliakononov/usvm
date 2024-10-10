@@ -73,6 +73,7 @@ import org.usvm.api.util.JcTestStateResolver.ResolveMode
 import org.usvm.api.util.Reflection.allocateInstance
 import org.usvm.api.util.Reflection.getFieldValue
 import org.usvm.api.util.Reflection.invoke
+import org.usvm.api.util.Reflection.setFieldValue
 import org.usvm.api.util.Reflection.toJavaClass
 import org.usvm.collection.array.UArrayIndexLValue
 import org.usvm.collection.array.UArrayRegion
@@ -114,6 +115,7 @@ import org.usvm.machine.interpreter.statics.JcStaticFieldsMemoryRegion
 import org.usvm.machine.interpreter.statics.staticFieldsInitializedFlagField
 import org.usvm.machine.state.JcState
 import org.usvm.machine.state.newStmt
+import org.usvm.machine.state.skipMethodInvocationWithValue
 import org.usvm.machine.state.throwExceptionWithoutStackFrameDrop
 import org.usvm.memory.UMemory
 import org.usvm.memory.UMemoryRegion
@@ -133,8 +135,8 @@ import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.util.LinkedList
 import java.util.Queue
-import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 
@@ -1094,7 +1096,7 @@ private class JcConcreteMemoryBindings(
         // TODO: (1) do not clone java.lang and java.lang.reflect
         // TODO: (2) do not clone Proxy and Lambda, but go to it's children and clone them (closure)
         // TODO: (3) do not clone ByteBuffer (mapping on memory)
-        // TODO: (4) do not clone objects with no fields
+        // TODO: (4) do not clone objects without fields (marker objects)
         // TODO: (5) use getFieldValue and setFieldValue from instrumentation.Reflection
         val type = obj.javaClass
         val jcType = type.toJcType(ctx) ?: return obj
@@ -1155,7 +1157,7 @@ private class JcConcreteMemoryBindings(
             val type = current.javaClass
             when {
                 type.isImmutable -> continue
-                type.isArray && current is Array<*> -> queue.addAll(current)
+                current is Array<*> -> queue.addAll(current)
                 else -> {
                     for (field in type.allInstanceFields) {
                         try {
@@ -1413,8 +1415,7 @@ private class JcConcreteArrayRegion<Sort : USort>(
     private val ctx: JcContext,
     private val bindings: JcConcreteMemoryBindings,
     private var baseRegion: UArrayRegion<JcType, Sort, USizeSort>,
-    private val marshall: Marshall,
-    private var mutatedArrays: MutableSet<UConcreteHeapAddress> = mutableSetOf()
+    private val marshall: Marshall
 ) : UArrayRegion<JcType, Sort, USizeSort>, JcConcreteRegion {
 
     private val indexType by lazy { ctx.cp.int }
@@ -1448,16 +1449,16 @@ private class JcConcreteArrayRegion<Sort : USort>(
             val toDstIdxObj = marshall.tryExprToObj(toDstIdx, indexType)
             val isConcreteCopy =
                 fromSrcIdxObj.hasValue && fromDstIdxObj.hasValue && toDstIdxObj.hasValue && operationGuard.isTrue
-            if (isConcreteCopy &&
-                bindings.arrayCopy(
-                    srcRef.address,
-                    dstRef.address,
-                    fromSrcIdxObj.value as Int,
-                    fromDstIdxObj.value as Int,
-                    toDstIdxObj.value as Int + 1 // Incrementing 'toDstIdx' index to make it exclusive
-                )
-            ) {
-                mutatedArrays.add(dstRef.address)
+            val success =
+                isConcreteCopy &&
+                    bindings.arrayCopy(
+                        srcRef.address,
+                        dstRef.address,
+                        fromSrcIdxObj.value as Int,
+                        fromDstIdxObj.value as Int,
+                        toDstIdxObj.value as Int + 1 // Incrementing 'toDstIdx' index to make it exclusive
+                    )
+            if (success) {
                 return this
             }
         }
@@ -1468,8 +1469,7 @@ private class JcConcreteArrayRegion<Sort : USort>(
         if (dstRef is UConcreteHeapRef)
             marshall.unmarshallArray(dstRef.address)
 
-        baseRegion =
-            baseRegion.memcpy(srcRef, dstRef, type, elementSort, fromSrcIdx, fromDstIdx, toDstIdx, operationGuard)
+        baseRegion = baseRegion.memcpy(srcRef, dstRef, type, elementSort, fromSrcIdx, fromDstIdx, toDstIdx, operationGuard)
 
         return this
     }
@@ -1494,7 +1494,6 @@ private class JcConcreteArrayRegion<Sort : USort>(
                     else null
                 }
                 if (elems.size == content.size && bindings.initializeArray(address, elems)) {
-                    mutatedArrays.add(address)
                     return this
                 }
             }
@@ -1537,7 +1536,6 @@ private class JcConcreteArrayRegion<Sort : USort>(
             val indexObj = marshall.tryExprToObj(key.index, indexType)
             val isConcreteWrite = valueObj.hasValue && indexObj.hasValue && guard.isTrue
             if (isConcreteWrite && bindings.writeArrayIndex(ref.address, indexObj.value as Int, valueObj.value)) {
-                mutatedArrays.add(ref.address)
                 return this
             }
 
@@ -1552,110 +1550,97 @@ private class JcConcreteArrayRegion<Sort : USort>(
     private fun unmarshallContentsCommon(
         address: UConcreteHeapAddress,
         descriptor: JcType,
-        forced: Boolean = false,
-        getElems: () -> Map<UExpr<USizeSort>, UExpr<Sort>>
+        elements: Map<UExpr<USizeSort>, UExpr<Sort>>
     ) {
-        if (forced || mutatedArrays.contains(address)) {
-            val elements = getElems()
-            baseRegion.initializeAllocatedArray(address, descriptor, sort, elements, ctx.trueExpr)
-        }
+        baseRegion = baseRegion.initializeAllocatedArray(address, descriptor, sort, elements, ctx.trueExpr)
     }
 
     @Suppress("UNCHECKED_CAST")
-    fun unmarshallArray(address: UConcreteHeapAddress, obj: Array<*>, desc: JcType, forced: Boolean = false) {
-        unmarshallContentsCommon(address, desc, forced) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, ctx.cp.objectType) as UExpr<Sort>
-            }.toMap()
-        }
+    fun unmarshallArray(address: UConcreteHeapAddress, obj: Array<*>, desc: JcType) {
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, ctx.cp.objectType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: ByteArray) {
         val elemType = ctx.cp.byte
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: ShortArray) {
         val elemType = ctx.cp.short
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: CharArray) {
         val elemType = ctx.cp.char
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: IntArray) {
         val elemType = ctx.cp.int
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: LongArray) {
         val elemType = ctx.cp.long
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: FloatArray) {
         val elemType = ctx.cp.float
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: DoubleArray) {
         val elemType = ctx.cp.double
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     @Suppress("UNCHECKED_CAST")
     fun unmarshallArray(address: UConcreteHeapAddress, obj: BooleanArray) {
         val elemType = ctx.cp.boolean
         val desc = ctx.arrayDescriptorOf(ctx.cp.arrayTypeOf(elemType))
-        unmarshallContentsCommon(address, desc) {
-            obj.mapIndexed { idx, value ->
-                ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
-            }.toMap()
-        }
+        val elements = obj.mapIndexed { idx, value ->
+            ctx.mkSizeExpr(idx) to marshall.objToExpr<USort>(value, elemType) as UExpr<Sort>
+        }.toMap()
+        unmarshallContentsCommon(address, desc, elements)
     }
 
     fun copy(bindings: JcConcreteMemoryBindings, marshall: Marshall): JcConcreteArrayRegion<Sort> {
@@ -1664,8 +1649,7 @@ private class JcConcreteArrayRegion<Sort : USort>(
             ctx,
             bindings,
             baseRegion,
-            marshall,
-            mutatedArrays
+            marshall
         )
     }
 }
@@ -1777,8 +1761,7 @@ private class JcConcreteRefMapRegion<ValueSort : USort>(
     private val ctx: JcContext,
     private val bindings: JcConcreteMemoryBindings,
     private var baseRegion: URefMapRegion<JcType, ValueSort>,
-    private val marshall: Marshall,
-    private val mutatedRefMaps: MutableSet<UConcreteHeapAddress> = mutableSetOf()
+    private val marshall: Marshall
 ) : URefMapRegion<JcType, ValueSort>, JcConcreteRegion {
 
     private val mapType = regionId.mapType
@@ -1806,9 +1789,7 @@ private class JcConcreteRefMapRegion<ValueSort : USort>(
             bindings.contains(dstRef.address)
         ) {
             val isConcreteCopy = operationGuard.isTrue
-            if (isConcreteCopy && bindings.mapMerge(srcRef.address, dstRef.address)
-            ) {
-                mutatedRefMaps.add(dstRef.address)
+            if (isConcreteCopy && bindings.mapMerge(srcRef.address, dstRef.address)) {
                 return this
             }
         }
@@ -1854,7 +1835,6 @@ private class JcConcreteRefMapRegion<ValueSort : USort>(
             val keyObj = marshall.tryExprToObj(key.mapKey, ctx.cp.objectType)
             val isConcreteWrite = valueObj.hasValue && keyObj.hasValue && guard.isTrue
             if (isConcreteWrite && bindings.writeMapValue(address, keyObj.value, valueObj.value)) {
-                mutatedRefMaps.add(address)
                 return this
             }
 
@@ -1877,11 +1857,9 @@ private class JcConcreteRefMapRegion<ValueSort : USort>(
         writeToBase(lvalue, rvalue, ctx.trueExpr)
     }
 
-    fun unmarshallContents(ref: UConcreteHeapRef, obj: Map<*, *>, forced: Boolean = false) {
-        if (forced || mutatedRefMaps.contains(ref.address)) {
-            for ((key, value) in obj) {
-                unmarshallEntry(ref, key, value)
-            }
+    fun unmarshallContents(ref: UConcreteHeapRef, obj: Map<*, *>) {
+        for ((key, value) in obj) {
+            unmarshallEntry(ref, key, value)
         }
     }
 
@@ -1891,8 +1869,7 @@ private class JcConcreteRefMapRegion<ValueSort : USort>(
             ctx,
             bindings,
             baseRegion,
-            marshall,
-            mutatedRefMaps
+            marshall
         )
     }
 }
@@ -1987,8 +1964,6 @@ private class JcConcreteRefSetRegion(
     private val setType by lazy { regionId.setType }
     private val sort by lazy { regionId.sort }
 
-    private val mutatedRefSets = mutableSetOf<UConcreteHeapAddress>()
-
     private fun writeToBase(key: URefSetEntryLValue<JcType>, value: UExpr<UBoolSort>, guard: UBoolExpr) {
         baseRegion = baseRegion.write(key, value, guard) as URefSetRegion<JcType>
     }
@@ -2013,9 +1988,7 @@ private class JcConcreteRefSetRegion(
             bindings.contains(dstRef.address)
         ) {
             val isConcreteCopy = operationGuard.isTrue
-            if (isConcreteCopy && bindings.setUnion(srcRef.address, dstRef.address)
-            ) {
-                mutatedRefSets.add(dstRef.address)
+            if (isConcreteCopy && bindings.setUnion(srcRef.address, dstRef.address)) {
                 return this
             }
         }
@@ -2053,7 +2026,6 @@ private class JcConcreteRefSetRegion(
             val valueObj = marshall.tryExprToObj(value, ctx.cp.boolean)
             val isConcreteWrite = valueObj.hasValue && keyObj.hasValue && guard.isTrue
             if (isConcreteWrite && bindings.changeSetContainsElement(address, keyObj.value, valueObj.value as Boolean)) {
-                mutatedRefSets.add(ref.address)
                 return this
             }
 
@@ -2089,11 +2061,9 @@ private class JcConcreteRefSetRegion(
         writeToBase(lvalue, ctx.trueExpr, ctx.trueExpr)
     }
 
-    fun unmarshallContents(ref: UConcreteHeapRef, obj: Set<*>, forced: Boolean = false) {
-        if (forced || mutatedRefSets.contains(ref.address)) {
-            for (elem in obj) {
-                unmarshallElement(ref, elem)
-            }
+    fun unmarshallContents(ref: UConcreteHeapRef, obj: Set<*>) {
+        for (elem in obj) {
+            unmarshallElement(ref, elem)
         }
     }
 
@@ -2115,16 +2085,17 @@ private class JcConcreteRefSetRegion(
 private class JcConcreteStaticFieldsRegion<Sort : USort>(
     private val regionId: JcStaticFieldRegionId<Sort>,
     private var baseRegion: JcStaticFieldsMemoryRegion<Sort>,
-    private val marshall: Marshall
+    private val marshall: Marshall,
+    private val writtenFields: MutableSet<JcStaticFieldLValue<Sort>> = mutableSetOf()
 ) : JcStaticFieldsMemoryRegion<Sort>(regionId.sort), JcConcreteRegion {
 
+    // TODO: redo #CM
     override fun read(key: JcStaticFieldLValue<Sort>): UExpr<Sort> {
         val field = key.field
         if (field is JcEnrichedVirtualField || field.name == staticFieldsInitializedFlagField.name)
             return baseRegion.read(key)
 
-        // Loading enclosing type and executing its class initializer
-        JcConcreteMemoryClassLoader.loadClass(field.enclosingClass)
+        check(JcConcreteMemoryClassLoader.isLoaded(field.enclosingClass))
         val fieldType = field.typedField.type
         return marshall.objToExpr(field.getFieldValue(JcConcreteMemoryClassLoader, null), fieldType)
     }
@@ -2134,19 +2105,31 @@ private class JcConcreteStaticFieldsRegion<Sort : USort>(
         value: UExpr<Sort>,
         guard: UBoolExpr
     ): JcConcreteStaticFieldsRegion<Sort> {
+        writtenFields.add(key)
         baseRegion = baseRegion.write(key, value, guard)
         return this
     }
 
     override fun mutatePrimitiveStaticFieldValuesToSymbolic(enclosingClass: JcClassOrInterface) {
-        baseRegion.mutatePrimitiveStaticFieldValuesToSymbolic(enclosingClass)
+        // No symbolic statics
+    }
+
+    fun fieldsWithValues(): MutableMap<JcField, UExpr<Sort>> {
+        val result: MutableMap<JcField, UExpr<Sort>> = mutableMapOf()
+        for (key in writtenFields) {
+            val value = baseRegion.read(key)
+            result[key.field] = value
+        }
+
+        return result
     }
 
     fun copy(marshall: Marshall): JcConcreteStaticFieldsRegion<Sort> {
         return JcConcreteStaticFieldsRegion(
             regionId,
             baseRegion,
-            marshall
+            marshall,
+            writtenFields.toMutableSet()
         )
     }
 }
@@ -2185,7 +2168,6 @@ private class JcConcreteCallSiteLambdaRegion(
     override fun findCallSite(ref: UConcreteHeapRef): JcLambdaCallSite? {
         return baseRegion.findCallSite(ref)
     }
-
 
     fun copy(bindings: JcConcreteMemoryBindings, marshall: Marshall): JcConcreteCallSiteLambdaRegion {
         return JcConcreteCallSiteLambdaRegion(
@@ -2483,7 +2465,6 @@ private class Marshall(
         obj: Any,
         descriptor: JcType,
         elemSort: USort,
-        forced: Boolean = false
     ) {
         val ref = ctx.mkConcreteHeapRef(address)
         val arrayRegion = regionStorage.getArrayRegion(descriptor, elemSort)
@@ -2530,7 +2511,7 @@ private class Marshall(
             }
 
             is Array<*> -> {
-                arrayRegion.unmarshallArray(address, obj, descriptor, forced)
+                arrayRegion.unmarshallArray(address, obj, descriptor)
                 arrayLengthRegion.unmarshallLength(ref, obj)
             }
         }
@@ -2546,15 +2527,15 @@ private class Marshall(
         unmarshallArray(address, obj, desc, elemSort)
     }
 
-    private fun unmarshallMap(address: UConcreteHeapAddress, obj: Map<*, *>, mapType: JcType, forced: Boolean = false) {
+    private fun unmarshallMap(address: UConcreteHeapAddress, obj: Map<*, *>, mapType: JcType) {
         val ref = ctx.mkConcreteHeapRef(address)
         val valueSort = ctx.addressSort
         val mapRegion = regionStorage.getMapRegion(mapType, valueSort)
         val mapLengthRegion = regionStorage.getMapLengthRegion(mapType)
         val keySetRegion = regionStorage.getSetRegion(mapType)
-        mapRegion.unmarshallContents(ref, obj, forced)
+        mapRegion.unmarshallContents(ref, obj)
         mapLengthRegion.unmarshallLength(ref, obj)
-        keySetRegion.unmarshallContents(ref, obj.keys, forced)
+        keySetRegion.unmarshallContents(ref, obj.keys)
         bindings.remove(address)
     }
 
@@ -2577,7 +2558,7 @@ private class Marshall(
         val getMethod = methods.find { it.name == "get" }!!
         val size = methods.find { it.name == "size" }!!.invoke(obj) as Int
         val array = Array<Any?>(size) { getMethod.invoke(obj, it) }
-        unmarshallArray(address, array, usvmApiSymbolicList, ctx.addressSort, true)
+        unmarshallArray(address, array, usvmApiSymbolicList, ctx.addressSort)
     }
 
     private fun createMapFromSymbolicMap(obj: Any): Map<*, *> {
@@ -2600,12 +2581,12 @@ private class Marshall(
 
     fun unmarshallSymbolicMap(address: UConcreteHeapAddress, obj: Any) {
         val map = createMapFromSymbolicMap(obj)
-        unmarshallMap(address, map, usvmApiSymbolicMap, true)
+        unmarshallMap(address, map, usvmApiSymbolicMap)
     }
 
     fun unmarshallSymbolicIdentityMap(address: UConcreteHeapAddress, obj: Any) {
         val map = createMapFromSymbolicMap(obj)
-        unmarshallMap(address, map, usvmApiSymbolicIdentityMap, true)
+        unmarshallMap(address, map, usvmApiSymbolicIdentityMap)
     }
 
     //endregion
@@ -2775,6 +2756,15 @@ private class JcConcreteRegionStorage(
         return lambdaCallSiteRegion!!
     }
 
+    fun allMutatedStaticFields(): Map<JcField, UExpr<out USort>> {
+        val result: MutableMap<JcField, UExpr<*>> = mutableMapOf()
+        staticFieldsRegions.forEach { (_, staticRegion) ->
+            result.putAll(staticRegion.fieldsWithValues())
+        }
+
+        return result
+    }
+
     fun copy(
         bindings: JcConcreteMemoryBindings,
         regionGetter: JcConcreteRegionGetter,
@@ -2822,8 +2812,13 @@ private class JcConcreteRegionStorage(
 //region Concrete Memory
 
 class JcThreadFactory : ThreadFactory {
+
+    private var count = 0
+
     override fun newThread(runnable: Runnable): Thread {
+        check(count == 0)
         val thread = Thread(runnable)
+        count++
         thread.contextClassLoader = JcConcreteMemoryClassLoader
         thread.isDaemon = true
         return thread
@@ -2836,6 +2831,7 @@ class JcConcreteMemory private constructor(
     stack: URegistersStack,
     mocks: UIndexedMocker<JcMethod>,
     regions: PersistentMap<UMemoryRegionId<*, *>, UMemoryRegion<*, *>>,
+    private val executor: ExecutorService,
     private val bindings: JcConcreteMemoryBindings,
     private var regionStorageVar: JcConcreteRegionStorage? = null,
     private var marshallVar: Marshall? = null
@@ -2852,8 +2848,6 @@ class JcConcreteMemory private constructor(
     private val ansiCyan: String = "\u001B[36m"
 
     private val throwableType = ctx.cp.findClass("java.lang.Throwable").toType()
-    private val threadFactory = JcThreadFactory()
-    private val executor = Executors.newSingleThreadExecutor(threadFactory)
 
     private val regionStorage: JcConcreteRegionStorage by lazy { regionStorageVar!! }
 
@@ -3064,6 +3058,7 @@ class JcConcreteMemory private constructor(
             stack,
             mocks,
             regions,
+            executor,
             bindings,
             regionStorage,
             marshall
@@ -3081,15 +3076,14 @@ class JcConcreteMemory private constructor(
 
     private fun methodIsInvokable(method: JcMethod): Boolean {
         return !(
-                method.isClassInitializer ||
-                        method.isConstructor && method.enclosingClass.isAbstract ||
-                        method.enclosingClass.isEnum && method.isConstructor ||
-                        method.humanReadableSignature.let {
-                            it.startsWith("org.usvm") ||
-                            it.startsWith("runtime.LibSLRuntime") ||
-                            it.startsWith("generated.") ||
-                            it.startsWith("stub.")
-                        }
+                    method.isConstructor && method.enclosingClass.isAbstract ||
+                    method.enclosingClass.isEnum && method.isConstructor ||
+                    method.humanReadableSignature.let {
+                        it.startsWith("org.usvm") ||
+                        it.startsWith("runtime.LibSLRuntime") ||
+                        it.startsWith("generated.") ||
+                        it.startsWith("stub.")
+                    }
                 )
     }
 
@@ -3211,6 +3205,28 @@ class JcConcreteMemory private constructor(
         }
     }
 
+    // TODO: no mutable statics! Delete! #CM
+    // TODO: collect classes, where where writes and initialize via JcConcreteMemoryClassLoader.loadClass(field.enclosingClass)
+    // TODO: maybe in executor #CM (make function 'callStaticInit')
+    private fun concretizeStatics(jcConcretizer: JcConcretizer) {
+        println(ansiGreen + "Concretizing statics" + ansiReset)
+        val statics = regionStorage.allMutatedStaticFields()
+        // TODO: optimize
+        statics.forEach { (field, value) ->
+            val javaField = field.toJavaField
+            if (javaField != null && !field.isFinal) {
+                val typedField = field.typedField
+                val concretizedValue = jcConcretizer.resolveExpr(value, typedField.type)
+                JcConcreteMemoryClassLoader.loadClass(field.enclosingClass)
+                val currentValue = field.getFieldValue(JcConcreteMemoryClassLoader, null)
+                if (concretizedValue != currentValue) {
+                    // TODO: remember field and current value #CM
+                    field.setFieldValue(JcConcreteMemoryClassLoader, null, concretizedValue)
+                }
+            }
+        }
+    }
+
     private fun concretize(
         state: JcState,
         exprResolver: JcExprResolver,
@@ -3221,8 +3237,11 @@ class JcConcreteMemory private constructor(
         // TODO: (2) mutate and concretize old object
         // TODO: (3) finish current state: add new path selector (after concretization it will finish current path)
         // TODO: (4) roll back changes after path finish via remembered objects
-        concretization = true
         val concretizer = JcConcretizer(state)
+        if (!concretization)
+            concretizeStatics(concretizer)
+
+        concretization = true
         val parameterInfos = method.parameters
         var parameters = stmt.arguments
         val isStatic = method.isStatic
@@ -3231,10 +3250,9 @@ class JcConcreteMemory private constructor(
 
         if (!isStatic) {
             val thisType = method.enclosingClass.toType()
-            thisObj =
-                concretizer.withMode(ResolveMode.CURRENT) {
-                    resolveReference(parameters[0].asExpr(ctx.addressSort), thisType)
-                }
+            thisObj = concretizer.withMode(ResolveMode.CURRENT) {
+                resolveReference(parameters[0].asExpr(ctx.addressSort), thisType)
+            }
             parameters = parameters.drop(1)
         }
 
@@ -3243,16 +3261,34 @@ class JcConcreteMemory private constructor(
             val info = parameterInfos[i]
             val value = parameters[i]
             val type = ctx.cp.findTypeOrNull(info.type)!!
-            val elem =
-                concretizer.withMode(ResolveMode.CURRENT) {
-                    resolveExpr(value, type)
-                }
+            val elem = concretizer.withMode(ResolveMode.CURRENT) {
+                resolveExpr(value, type)
+            }
             objParameters.add(elem)
         }
 
         check(objParameters.size == parameters.size)
         println(ansiGreen + "Concretizing ${method.humanReadableSignature}" + ansiReset)
         invoke(state, exprResolver, stmt, method, thisObj, objParameters)
+    }
+
+    private fun ensureClinit(type: JcClassOrInterface) {
+        executor.submit {
+            try {
+                // Loading type and executing its class initializer
+                JcConcreteMemoryClassLoader.loadClass(type)
+            } catch (e: Throwable) {
+                error("clinit should not throw exceptions")
+            }
+        }.get()
+    }
+
+    private fun unfoldException(e: Throwable): Throwable {
+        return when {
+            e is ExecutionException && e.cause != null -> unfoldException(e.cause!!)
+            e is InvocationTargetException -> e.targetException
+            else -> e
+        }
     }
 
     private fun invoke(
@@ -3265,41 +3301,41 @@ class JcConcreteMemory private constructor(
     ) {
         var thisArg = thisObj
         try {
-            val future = executor.submit(Callable { method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters) })
-            val resultObj: Any?
-            try {
+            var resultObj: Any? = null
+            var exception: Throwable? = null
+            executor.submit {
                 try {
-                    resultObj = future.get()
-                } catch (e: ExecutionException) {
-                    val cause = e.cause
-                    if (cause != null)
-                        throw cause
-                    else throw e
+                    resultObj = method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters)
+                } catch (e: Throwable) {
+                    exception = unfoldException(e)
                 }
-            } catch (e: InvocationTargetException) {
-                throw e.targetException
-            }
+            }.get()
 
-            println("Result $resultObj")
-            if (method.isConstructor) {
-                val thisAddress = bindings.tryPhysToVirt(thisObj!!)
-                check(thisAddress != null)
-                thisArg = resultObj
-                val type = bindings.typeOf(thisAddress)
-                bindings.remove(thisAddress)
-                types.remove(thisAddress)
-                bindings.allocate(thisAddress, resultObj!!, type)
-            }
+            if (exception == null) {
+                // No exception
+                println("Result $resultObj")
+                if (method.isConstructor) {
+                    val thisAddress = bindings.tryPhysToVirt(thisObj!!)
+                    check(thisAddress != null)
+                    thisArg = resultObj
+                    val type = bindings.typeOf(thisAddress)
+                    bindings.remove(thisAddress)
+                    types.remove(thisAddress)
+                    bindings.allocate(thisAddress, resultObj!!, type)
+                }
 
-            val returnType = ctx.cp.findTypeOrNull(method.returnType)!!
-            val result: UExpr<USort> = marshall.objToExpr(resultObj, returnType)
-            exprResolver.ensureExprCorrectness(result, returnType)
-            state.newStmt(JcConcreteInvocationResult(result, stmt))
-        } catch (e: Throwable) {
-            val jcType = ctx.jcTypeOf(e)
-            println("Exception ${e.javaClass} with message ${e.message}")
-            val exception = allocateObject(e, jcType)
-            state.throwExceptionWithoutStackFrameDrop(exception, jcType)
+                val returnType = ctx.cp.findTypeOrNull(method.returnType)!!
+                val result: UExpr<USort> = marshall.objToExpr(resultObj, returnType)
+                exprResolver.ensureExprCorrectness(result, returnType)
+                state.newStmt(JcConcreteInvocationResult(result, stmt))
+            } else {
+                // Exception thrown
+                val e = exception!!
+                val jcType = ctx.jcTypeOf(e)
+                println("Exception ${e.javaClass} with message ${e.message}")
+                val exceptionObj = allocateObject(e, jcType)
+                state.throwExceptionWithoutStackFrameDrop(exceptionObj, jcType)
+            }
         } finally {
             objParameters.forEach {
                 bindings.reTrackObject(it)
@@ -3307,6 +3343,12 @@ class JcConcreteMemory private constructor(
             if (thisObj != null)
                 bindings.reTrackObject(thisArg)
         }
+    }
+
+    private fun shouldNotInvokeClinit(method: JcMethod): Boolean {
+        check(method.isClassInitializer)
+        // TODO: add recursive static fields check: if static field of another class was read it should not be symbolic #CM
+        return method is JcEnrichedVirtualMethod
     }
 
     private fun tryConcreteInvoke(stmt: JcMethodCall, state: JcState, exprResolver: JcExprResolver): Boolean {
@@ -3317,13 +3359,25 @@ class JcConcreteMemory private constructor(
 
         val signature = method.humanReadableSignature
 
+        if (method.isClassInitializer) {
+            if (shouldNotInvokeClinit(method))
+                // Executing clinit symbolically
+                return false
+
+            // Executing clinit concretely
+            ensureClinit(method.enclosingClass)
+            state.skipMethodInvocationWithValue(stmt, ctx.voidValue)
+            return true
+        }
+
         if (concretizeInvocations.contains(signature) || concretization && !forbiddenInvocations.contains(signature)) {
             concretize(state, exprResolver, stmt, method)
             return true
         }
 
         if (!bindings.isWritable && concreteMutatingInvocations.contains(signature)) {
-            // TODO: delete (!shouldInvoke(signature) will do the thing) #CM
+            // TODO: delete this
+            // TODO: !shouldInvoke(signature) will do the thing #CM
             return false
         }
 //        if (!shouldInvoke(method)) { // TODO: uncomment #CM
@@ -3385,6 +3439,11 @@ class JcConcreteMemory private constructor(
         return success
     }
 
+    fun endConcretize() {
+        concretization = false
+        bindings.applyBacktrack()
+    }
+
     //endregion
 
     companion object {
@@ -3397,7 +3456,8 @@ class JcConcreteMemory private constructor(
             val stack = URegistersStack()
             val mocks = UIndexedMocker<JcMethod>()
             val regions: PersistentMap<UMemoryRegionId<*, *>, UMemoryRegion<*, *>> = persistentMapOf()
-            val memory = JcConcreteMemory(ctx, typeConstraints, stack, mocks, regions, bindings)
+            val executor = Executors.newSingleThreadExecutor(JcThreadFactory())
+            val memory = JcConcreteMemory(ctx, typeConstraints, stack, mocks, regions, executor, bindings)
             val storage = JcConcreteRegionStorage(ctx, memory)
             val marshall = Marshall(ctx, bindings, storage)
             memory.regionStorageVar = storage
@@ -3558,6 +3618,7 @@ class JcConcreteMemory private constructor(
             "org.thymeleaf.web.servlet.JakartaServletWebRequest#getNativeRequestObject():java.lang.Object",
             "java.lang.StringBuilder#_assumeInvariants():void",
             "org.springframework.core.io.DefaultResourceLoader#getProtocolResolvers():java.util.Collection",
+            "org.springframework.boot.SpringApplication#endOfPathAnalysis():void",
         )
 
         private val concreteMutatingInvocations = setOf(

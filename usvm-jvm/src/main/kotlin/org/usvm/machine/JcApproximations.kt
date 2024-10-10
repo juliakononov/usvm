@@ -98,6 +98,7 @@ import org.usvm.api.util.JcConcreteMemoryClassLoader
 import org.usvm.api.util.Reflection.toJavaClass
 import org.usvm.api.writeField
 import org.usvm.getIntValue
+import org.usvm.machine.state.concreteMemory.JcConcreteMemory
 import org.usvm.machine.state.concreteMemory.allInstanceFields
 import org.usvm.machine.state.newStmt
 import org.usvm.mkSizeAddExpr
@@ -624,6 +625,15 @@ class JcMethodApproximationResolver(
                 val framesToDrop = callStack.size - 1
                 callStack.dropFromBottom(framesToDrop)
                 memory.stack.dropFromBottom(framesToDrop)
+                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
+            }
+
+            return true
+        }
+
+        if (methodName.equals("endOfPathAnalysis")) {
+            scope.doWithState {
+                (memory as JcConcreteMemory).endConcretize()
                 skipMethodInvocationWithValue(methodCall, ctx.voidValue)
             }
 
