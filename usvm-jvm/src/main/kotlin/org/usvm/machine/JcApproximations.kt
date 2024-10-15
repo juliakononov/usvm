@@ -634,6 +634,7 @@ class JcMethodApproximationResolver(
         if (methodName.equals("endOfPathAnalysis")) {
             scope.doWithState {
                 (memory as JcConcreteMemory).endConcretize()
+                // TODO: generate test #CM
                 skipMethodInvocationWithValue(methodCall, ctx.voidValue)
             }
 
@@ -652,7 +653,7 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("internalLog")) {
+        if (methodName.equals("println")) {
             scope.doWithState {
                 val messageExpr = methodCall.arguments[1].asExpr(ctx.addressSort) as UConcreteHeapRef
                 val message = memory.tryHeapRefToObject(messageExpr) as String
