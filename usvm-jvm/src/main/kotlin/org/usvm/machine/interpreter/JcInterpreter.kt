@@ -373,8 +373,6 @@ class JcInterpreter(
                     return
                 }
 
-                println("\u001B[31m" + "Calling virtual ${stmt.method.humanReadableSignature}" + "\u001B[0m")
-
                 resolveVirtualInvoke(stmt, scope)
             }
 

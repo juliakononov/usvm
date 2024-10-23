@@ -75,6 +75,8 @@ import org.usvm.api.util.Reflection.getFieldValue
 import org.usvm.api.util.Reflection.invoke
 import org.usvm.api.util.Reflection.setFieldValue
 import org.usvm.api.util.Reflection.toJavaClass
+import org.usvm.instrumentation.util.getFieldValue as getFieldValueUnsafe
+import org.usvm.instrumentation.util.setFieldValue as setFieldValueUnsafe
 import org.usvm.collection.array.UArrayIndexLValue
 import org.usvm.collection.array.UArrayRegion
 import org.usvm.collection.array.UArrayRegionId
@@ -99,6 +101,7 @@ import org.usvm.collection.set.ref.URefSetEntryLValue
 import org.usvm.collection.set.ref.URefSetRegion
 import org.usvm.collection.set.ref.URefSetRegionId
 import org.usvm.constraints.UTypeConstraints
+import org.usvm.instrumentation.util.isStatic
 import org.usvm.isFalse
 import org.usvm.isTrue
 import org.usvm.machine.JcConcreteInvocationResult
@@ -113,7 +116,6 @@ import org.usvm.machine.interpreter.statics.JcStaticFieldLValue
 import org.usvm.machine.interpreter.statics.JcStaticFieldRegionId
 import org.usvm.machine.interpreter.statics.JcStaticFieldsMemoryRegion
 import org.usvm.machine.interpreter.statics.staticFieldsInitializedFlagField
-import org.usvm.machine.state.JcMethodResult
 import org.usvm.machine.state.JcState
 import org.usvm.machine.state.newStmt
 import org.usvm.machine.state.skipMethodInvocationWithValue
@@ -137,7 +139,6 @@ import java.lang.reflect.Proxy
 import java.util.LinkedList
 import java.util.Queue
 import java.util.concurrent.ExecutionException
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 
@@ -216,12 +217,33 @@ private val JcClassType.declaredInstanceFields: List<JcTypedField>
 private val Class<*>.allInstanceFields: List<Field>
     get() = allFields.filter { !Modifier.isStatic(it.modifiers) }
 
-private fun Field.getFieldValue(obj: Any): Any? {
+private val JcClassOrInterface.staticFields: List<JcField>
+    get() = declaredFields.filter { it.isStatic }
+
+fun Field.getFieldValue(obj: Any): Any? {
+    check(!isStatic)
     isAccessible = true
     return get(obj)
 }
 
-private fun JcField.getFieldValue(obj: Any): Any? {
+fun Field.getStaticFieldValue(): Any? {
+    check(isStatic)
+    isAccessible = true
+    return get(null)
+    // TODO: null!! #CM #Valya
+//    return getFieldValueUnsafe(null)
+}
+
+fun Field.setStaticFieldValue(value: Any?) {
+//    isAccessible = true
+//    set(null, value)
+    setFieldValueUnsafe(null, value)
+}
+
+private val Field.isFinal: Boolean
+    get() = Modifier.isFinal(modifiers)
+
+fun JcField.getFieldValue(obj: Any): Any? {
     if (this is JcEnrichedVirtualField) {
         val javaField = obj.javaClass.allInstanceFields.find { it.name == name }!!
         return javaField.getFieldValue(obj)
@@ -230,7 +252,7 @@ private fun JcField.getFieldValue(obj: Any): Any? {
     return this.getFieldValue(JcConcreteMemoryClassLoader, obj)
 }
 
-private fun Field.setFieldValue(obj: Any, value: Any?) {
+fun Field.setFieldValue(obj: Any, value: Any?) {
     isAccessible = true
     set(obj, value)
 }
@@ -300,6 +322,9 @@ private val Class<*>.isProxy: Boolean
 private val Class<*>.isLambda: Boolean
     get() = typeName.contains('/') && typeName.contains("\$\$Lambda\$")
 
+private val Class<*>.isThreadLocal: Boolean
+    get() = ThreadLocal::class.java.isAssignableFrom(this)
+
 private val Class<*>.notTracked: Boolean
     get() =
         this.isPrimitive ||
@@ -348,7 +373,32 @@ private val JcType.isSolid: Boolean
                 this is JcArrayType && this.elementType.notTracked
 
 private fun Class<*>.toJcType(ctx: JcContext): JcType? {
-    return ctx.cp.findTypeOrNull(this.typeName)
+    try {
+        if (isProxy) {
+            val interfaces = interfaces
+            if (interfaces.size == 1)
+                return ctx.cp.findTypeOrNull(interfaces[0].typeName)
+
+            return null
+        }
+
+        if (isLambda) {
+            val db = ctx.cp.db
+            val vfs = db.javaClass.allInstanceFields.find { it.name == "classesVfs" }!!.getFieldValue(db)!!
+            val loc =
+                ctx.cp.registeredLocations.find { it.jcLocation?.jarOrFolder?.absolutePath?.startsWith("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes") == true }!!
+            val addMethod = vfs.javaClass.methods.find { it.name == "addClass" }!!
+            val source = LazyClassSourceImpl(loc, typeName)
+            addMethod.invoke(vfs, source)
+
+            val name = typeName.split('/')[0]
+            return ctx.cp.findTypeOrNull(name)
+        }
+
+        return ctx.cp.findTypeOrNull(this.typeName)
+    } catch (e: Throwable) {
+        return null
+    }
 }
 
 //endregion
@@ -358,6 +408,51 @@ private typealias childrenType = MutableMap<PhysicalAddress, childMapType>
 private typealias parentMapType = MutableMap<PhysicalAddress, ChildKind>
 private typealias parentsType = MutableMap<PhysicalAddress, parentMapType>
 
+private enum class JcConcreteMemoryState {
+    Mutable,
+    MutableWithBacktrack,
+    Immutable,
+    Dead
+}
+
+private data class JcConcreteMemoryStateHolder(
+    var state: JcConcreteMemoryState
+) {
+    fun isWritable(): Boolean {
+        return when (state) {
+            JcConcreteMemoryState.Mutable -> true
+            JcConcreteMemoryState.MutableWithBacktrack -> true
+            JcConcreteMemoryState.Immutable -> false
+            JcConcreteMemoryState.Dead -> false
+        }
+    }
+
+    fun isDead(): Boolean {
+        return state == JcConcreteMemoryState.Dead
+    }
+
+    fun isAlive(): Boolean {
+        return !isDead()
+    }
+
+    fun isBacktrack(): Boolean {
+        return state == JcConcreteMemoryState.MutableWithBacktrack
+    }
+}
+
+private class JcConcreteBacktrackPart {
+    val backtrackChanges: MutableMap<PhysicalAddress, PhysicalAddress> = mutableMapOf()
+    val backtrackStatics: MutableMap<Field, PhysicalAddress> = mutableMapOf()
+    val staticsCache: MutableSet<JcClassOrInterface> = mutableSetOf()
+    val forks: MutableList<JcConcreteMemoryStateHolder> = mutableListOf()
+}
+
+fun <T> ArrayDeque<T>.push(element: T): Unit = addLast(element)
+
+fun <T> ArrayDeque<T>.pop(): T = removeLast()
+
+fun <T> ArrayDeque<T>.peek(): T = last()
+
 //region Concrete Memory Bindings
 
 private class JcConcreteMemoryBindings(
@@ -365,27 +460,31 @@ private class JcConcreteMemoryBindings(
     private val typeConstraints: UTypeConstraints<JcType>,
     private val physToVirt: MutableMap<PhysicalAddress, UConcreteHeapAddress>,
     private val virtToPhys: MutableMap<UConcreteHeapAddress, PhysicalAddress>,
-    var isWritable: Boolean,
+    val state: JcConcreteMemoryStateHolder,
     private val children: MutableMap<PhysicalAddress, childMapType>,
     private val parents: MutableMap<PhysicalAddress, parentMapType>,
     private val fullyConcretes: MutableSet<PhysicalAddress>,
-    private val newAddresses: MutableSet<UConcreteHeapAddress>,
-    private val backtrackChanges: MutableMap<PhysicalAddress, PhysicalAddress>,
+    val backtrackChanges: ArrayDeque<JcConcreteBacktrackPart>,
+    private val getThreadLocalValue: (threadLocal: Any) -> Any?,
+    private val setThreadLocalValue: (threadLocal: Any, value: Any?) -> Unit,
 ) {
     constructor(
         ctx: JcContext,
-        typeConstraints: UTypeConstraints<JcType>
+        typeConstraints: UTypeConstraints<JcType>,
+        getThreadLocalValue: (threadLocal: Any) -> Any?,
+        setThreadLocalValue: (threadLocal: Any, value: Any?) -> Unit,
     ) : this(
         ctx,
         typeConstraints,
         mutableMapOf(),
         mutableMapOf(),
-        true,
+        JcConcreteMemoryStateHolder(JcConcreteMemoryState.Mutable),
         mutableMapOf(),
         mutableMapOf(),
         mutableSetOf(),
-        mutableSetOf(),
-        mutableMapOf(),
+        ArrayDeque(),
+        getThreadLocalValue,
+        setThreadLocalValue,
     )
 
     init {
@@ -423,7 +522,22 @@ private class JcConcreteMemoryBindings(
     }
 
     fun makeNonWritable() {
-        isWritable = false
+        state.state = JcConcreteMemoryState.Immutable
+    }
+
+    private fun enableBacktrack() {
+        check(state.isAlive())
+        if (state.isBacktrack())
+            return
+
+        val part = JcConcreteBacktrackPart()
+        part.forks.add(state)
+        backtrackChanges.push(part)
+    }
+
+    fun makeMutableWithBacktrack() {
+        enableBacktrack()
+        state.state = JcConcreteMemoryState.MutableWithBacktrack
     }
 
     //endregion
@@ -633,13 +747,11 @@ private class JcConcreteMemoryBindings(
 
     //region Allocation
 
-    private val forbiddenTypes = setOf<String>(
-//        "java.net.NetPermission",
-//        "org.springframework.boot.BootstrapRegistryInitializer"
-    )
-
     private fun shouldAllocate(type: JcType): Boolean {
-        return !forbiddenTypes.contains(type.internalName)
+        return !type.typeName.startsWith("org.usvm.api.") &&
+                !type.typeName.startsWith("generated.") &&
+                !type.typeName.startsWith("stub.") &&
+                !type.typeName.startsWith("runtime.")
     }
 
     private val interningTypes = setOf<JcType>(
@@ -654,7 +766,13 @@ private class JcConcreteMemoryBindings(
         virtToPhys[address] = physicalAddress
         physToVirt[physicalAddress] = address
         typeConstraints.allocate(address, type)
-        newAddresses.add(address)
+    }
+
+    private fun createNewAddress(type: JcType, static: Boolean): UConcreteHeapAddress {
+        if (type.isEnum || type.isEnumArray || static)
+            return ctx.addressCounter.freshStaticAddress()
+
+        return ctx.addressCounter.freshAllocatedAddress()
     }
 
     private fun allocate(obj: Any, type: JcType, static: Boolean): UConcreteHeapAddress {
@@ -665,10 +783,7 @@ private class JcConcreteMemoryBindings(
             }
         }
 
-        val address =
-            if (type.isEnum || type.isEnumArray || static)
-                ctx.addressCounter.freshStaticAddress()
-            else ctx.addressCounter.freshAllocatedAddress()
+        val address = createNewAddress(type, static)
         allocate(address, obj, type)
         return address
     }
@@ -690,6 +805,10 @@ private class JcConcreteMemoryBindings(
 
     fun allocate(obj: Any, type: JcType): UConcreteHeapAddress? {
         return allocateIfShould(obj, type)
+    }
+
+    fun forceAllocate(obj: Any, type: JcType): UConcreteHeapAddress {
+        return allocate(obj, type, false)
     }
 
     class LambdaInvocationHandler : InvocationHandler {
@@ -840,8 +959,13 @@ private class JcConcreteMemoryBindings(
     //region Writing
 
     fun writeClassField(address: UConcreteHeapAddress, field: Field, value: Any?): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val obj = virtToPhys(address)
+            if (state.isBacktrack())
+                // TODO: add to backtrack only one field #CM
+                addObjectToBacktrack(obj)
+
             field.setFieldValue(obj, value)
 
             if (!field.type.notTracked)
@@ -851,8 +975,12 @@ private class JcConcreteMemoryBindings(
     }
 
     fun <Value> writeArrayIndex(address: UConcreteHeapAddress, index: Int, value: Value): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val obj = virtToPhys(address)
+            if (state.isBacktrack())
+                addObjectToBacktrack(obj)
+
             obj.setArrayValue(index, value)
 
             val arrayType = typeConstraints.typeOf(address)
@@ -866,9 +994,12 @@ private class JcConcreteMemoryBindings(
 
     @Suppress("UNCHECKED_CAST")
     fun <Value> initializeArray(address: UConcreteHeapAddress, contents: List<Pair<Int, Value>>): Boolean {
-        val success = isWritable || newAddresses.contains(address)
-        if (success) {
+        val isWritable = state.isWritable()
+        if (isWritable) {
             val obj = virtToPhys(address)
+            if (state.isBacktrack())
+                addObjectToBacktrack(obj)
+
             val arrayType = obj.javaClass
             check(arrayType.isArray)
             val elemType = arrayType.componentType
@@ -941,7 +1072,7 @@ private class JcConcreteMemoryBindings(
                 else -> error("JcConcreteMemoryBindings.initializeArray: unexpected array $obj")
             }
         }
-        return success
+        return isWritable
     }
 
     fun writeArrayLength(address: UConcreteHeapAddress, length: Int): Boolean {
@@ -959,8 +1090,11 @@ private class JcConcreteMemoryBindings(
 
     @Suppress("UNCHECKED_CAST")
     fun writeMapValue(address: UConcreteHeapAddress, key: Any?, value: Any?): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val obj = virtToPhys(address)
+            if (state.isBacktrack())
+                addObjectToBacktrack(obj)
             obj as MutableMap<Any?, Any?>
             obj[key] = value
         }
@@ -977,8 +1111,12 @@ private class JcConcreteMemoryBindings(
 
     @Suppress("UNCHECKED_CAST")
     fun changeSetContainsElement(address: UConcreteHeapAddress, element: Any?, contains: Boolean): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val obj = virtToPhys(address)
+            if (state.isBacktrack())
+                addObjectToBacktrack(obj)
+
             obj as MutableSet<Any?>
             if (contains)
                 obj.add(element)
@@ -1000,9 +1138,13 @@ private class JcConcreteMemoryBindings(
         fromDstIdx: Int,
         toDstIdx: Int
     ): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val srcArray = virtToPhys(srcAddress)
             val dstArray = virtToPhys(dstAddress)
+            if (state.isBacktrack())
+                addObjectToBacktrack(dstArray)
+
             val toSrcIdx = toDstIdx - fromDstIdx + fromSrcIdx
             val dstArrayType = dstArray.javaClass
             val dstArrayElemType = dstArrayType.componentType
@@ -1065,9 +1207,12 @@ private class JcConcreteMemoryBindings(
 
     @Suppress("UNCHECKED_CAST")
     fun mapMerge(srcAddress: UConcreteHeapAddress, dstAddress: UConcreteHeapAddress): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val srcMap = virtToPhys(srcAddress) as MutableMap<Any, Any>
             val dstMap = virtToPhys(dstAddress) as MutableMap<Any, Any>
+            if (state.isBacktrack())
+                addObjectToBacktrack(dstMap)
             dstMap.putAll(srcMap)
         }
 
@@ -1080,9 +1225,12 @@ private class JcConcreteMemoryBindings(
 
     @Suppress("UNCHECKED_CAST")
     fun setUnion(srcAddress: UConcreteHeapAddress, dstAddress: UConcreteHeapAddress): Boolean {
+        val isWritable = state.isWritable()
         if (isWritable) {
             val srcSet = virtToPhys(srcAddress) as MutableSet<Any>
             val dstSet = virtToPhys(dstAddress) as MutableSet<Any>
+            if (state.isBacktrack())
+                addObjectToBacktrack(dstSet)
             dstSet.addAll(srcSet)
         }
 
@@ -1093,18 +1241,18 @@ private class JcConcreteMemoryBindings(
 
     //region Backtracking
 
-    private fun cloneObject(obj: Any): Any {
+    private fun cloneObject(obj: Any): Any? {
         // TODO: (1) do not clone java.lang and java.lang.reflect
         // TODO: (2) do not clone Proxy and Lambda, but go to it's children and clone them (closure)
         // TODO: (3) do not clone ByteBuffer (mapping on memory)
         // TODO: (4) do not clone objects without fields (marker objects)
         // TODO: (5) use getFieldValue and setFieldValue from instrumentation.Reflection
         val type = obj.javaClass
-        val jcType = type.toJcType(ctx) ?: return obj
+        val jcType = type.toJcType(ctx) ?: return null
         when {
-            type.isImmutable -> return obj
+            type.isImmutable -> return null
             // TODO: clone lambda and maybe proxy #CM
-            type.isProxy || type.isLambda -> return obj
+            type.isProxy || type.isLambda -> return null
             jcType is JcArrayType -> {
                 return when (obj) {
                     is IntArray -> obj.clone()
@@ -1128,44 +1276,57 @@ private class JcConcreteMemoryBindings(
                     }
                     return newObj
                 } catch (e: Exception) {
-                    println("cloneObject failed on class ${type.name}")
-                    return obj
+//                    println("cloneObject failed on class ${type.name}")
+                    return null
                 }
             }
-            else -> return obj
+            else -> return null
         }
     }
 
-    fun addObjectToBacktrack(obj: Any) {
+    private fun addObjectToBacktrack(obj: Any, part: JcConcreteBacktrackPart) {
         val type = obj.javaClass
         if (type.isImmutable)
             return
 
         val oldPhys = PhysicalAddress(obj)
-        val clonedPhys = PhysicalAddress(cloneObject(obj))
-        backtrackChanges[oldPhys] = clonedPhys
+        val clonedObj = cloneObject(obj) ?: return
+        val clonedPhys = PhysicalAddress(clonedObj)
+        part.backtrackChanges[oldPhys] = clonedPhys
     }
 
-    fun addObjectToBacktrackRec(obj: Any) {
+    fun addObjectToBacktrack(obj: Any) {
+        addObjectToBacktrack(obj, backtrackChanges.peek())
+    }
+
+    fun addObjectToBacktrackRec(obj: Any?) {
         val queue: Queue<Any?> = LinkedList()
         queue.add(obj)
-        // TODO: if object already in backtrackChanges, do not proceed #CM
+        val part = backtrackChanges.peek()
         while (queue.isNotEmpty()) {
             val current = queue.poll() ?: continue
-            if (backtrackChanges.containsKey(PhysicalAddress(current)))
+            if (part.backtrackChanges.containsKey(PhysicalAddress(current)))
                 continue
 
-            addObjectToBacktrack(current)
             val type = current.javaClass
+            if (type.isThreadLocal) {
+                val value = getThreadLocalValue(current)
+                queue.add(value)
+                part.backtrackChanges[PhysicalAddress(current)] = PhysicalAddress(value)
+                continue
+            }
+
+            addObjectToBacktrack(current, part)
             when {
                 type.isImmutable -> continue
                 current is Array<*> -> queue.addAll(current)
+                type.isArray -> continue
                 else -> {
                     for (field in type.allInstanceFields) {
                         try {
                             queue.add(field.getFieldValue(current))
                         } catch (e: Throwable) {
-                            println("addObjectToBacktrackRec failed on class ${type.name}")
+//                            println("addObjectToBacktrackRec failed on class ${type.name}")
                             continue
                         }
                     }
@@ -1174,15 +1335,33 @@ private class JcConcreteMemoryBindings(
         }
     }
 
+    fun addStaticsToBacktrack(types: List<JcClassOrInterface>) {
+        val part = backtrackChanges.peek()
+        for (type in types) {
+            if (type.name == "org.springframework.web.context.request.RequestContextHolder")
+                println()
+            if (!part.staticsCache.add(type))
+                continue
+            val fields = type.staticFields.mapNotNull { it.toJavaField }
+            for (field in fields) {
+                val value = field.getStaticFieldValue()
+                addObjectToBacktrackRec(value)
+                if (!field.isFinal)
+                    part.backtrackStatics[field] = PhysicalAddress(value)
+            }
+        }
+    }
+
     @Suppress("UNCHECKED_CAST")
-    fun applyBacktrack() {
-        for ((oldPhys, clonedPhys) in backtrackChanges) {
+    private fun applyBacktrack(changesToBacktrack: Map<PhysicalAddress, PhysicalAddress>) {
+        for ((oldPhys, clonedPhys) in changesToBacktrack) {
             val oldObj = oldPhys.obj ?: continue
             val obj = clonedPhys.obj ?: continue
-            val type = obj.javaClass
-            check(oldObj.javaClass == type)
+            val type = oldObj.javaClass
+            check(type == obj.javaClass || type.isThreadLocal)
             when {
                 type.isImmutable -> continue
+                type.isThreadLocal -> setThreadLocalValue(oldObj, obj)
                 type.isArray -> {
                     when {
                         obj is IntArray && oldObj is IntArray -> {
@@ -1239,12 +1418,26 @@ private class JcConcreteMemoryBindings(
                     for (field in type.allInstanceFields) {
                         try {
                             val value = field.getFieldValue(obj)
-                            field.setFieldValue(oldObj, value)
+                            field.setFieldValueUnsafe(oldObj, value)
                         } catch (e: Exception) {
                             error("applyBacktrack class ${type.name} failed on field ${field.name}, cause: ${e.message}")
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fun applyBacktrack() {
+        var flag = true
+        while (flag) {
+            val part = backtrackChanges.peek()
+            if (part.forks.all { it.isDead() }) {
+                backtrackChanges.pop()
+                applyBacktrack(part.backtrackChanges)
+                // TODO: backtrack statics #CM
+            } else {
+                flag = false
             }
         }
     }
@@ -1283,24 +1476,28 @@ private class JcConcreteMemoryBindings(
         return newParents
     }
 
-    private fun copyBacktrackChanges(): MutableMap<PhysicalAddress, PhysicalAddress> {
-        check(backtrackChanges.isEmpty())
-        return backtrackChanges.toMutableMap();
+    private fun copyBacktrackChanges(newState: JcConcreteMemoryStateHolder): ArrayDeque<JcConcreteBacktrackPart> {
+        for (part in backtrackChanges) {
+            part.forks.add(newState)
+        }
+
+        return ArrayDeque(backtrackChanges)
     }
 
     fun copy(typeConstraints: UTypeConstraints<JcType>): JcConcreteMemoryBindings {
-        newAddresses.clear()
+        val newState = JcConcreteMemoryStateHolder(state.state)
         return JcConcreteMemoryBindings(
             ctx,
             typeConstraints,
             physToVirt.toMutableMap(),
             virtToPhys.toMutableMap(),
-            isWritable,
+            newState,
             copyChildren(),
             copyParents(),
             fullyConcretes.toMutableSet(),
-            mutableSetOf(),
-            copyBacktrackChanges(),
+            copyBacktrackChanges(newState),
+            getThreadLocalValue,
+            setThreadLocalValue,
         )
     }
 
@@ -2099,7 +2296,11 @@ private class JcConcreteStaticFieldsRegion<Sort : USort>(
 
         check(JcConcreteMemoryClassLoader.isLoaded(field.enclosingClass))
         val fieldType = field.typedField.type
-        return marshall.objToExpr(field.getFieldValue(JcConcreteMemoryClassLoader, null), fieldType)
+        val javaField = field.toJavaField!!
+        val value = javaField.getStaticFieldValue()
+        // TODO: differs from jcField.getFieldValue(JcConcreteMemoryClassLoader, null) #CM
+//        val value = field.getFieldValue(JcConcreteMemoryClassLoader, null)
+        return marshall.objToExpr(value, fieldType)
     }
 
     override fun write(
@@ -2108,6 +2309,7 @@ private class JcConcreteStaticFieldsRegion<Sort : USort>(
         guard: UBoolExpr
     ): JcConcreteStaticFieldsRegion<Sort> {
         writtenFields.add(key)
+        // TODO: mutate concrete statics #CM
         baseRegion = baseRegion.write(key, value, guard)
         return this
     }
@@ -2352,34 +2554,7 @@ private class Marshall(
     //region Object To Expression Conversion
 
     private fun typeOfObject(obj: Any): JcType? {
-        try {
-            val objJavaClass = obj.javaClass
-            val typeName = objJavaClass.typeName
-
-            if (objJavaClass.isProxy) {
-                val interfaces = objJavaClass.interfaces
-                if (interfaces.size == 1)
-                    return ctx.cp.findType(interfaces[0].typeName)
-
-                return null
-            }
-
-            if (objJavaClass.isLambda) {
-                val db = ctx.cp.db
-                val vfs = db.javaClass.allInstanceFields.find { it.name == "classesVfs" }!!.getFieldValue(db)!!
-                val loc = ctx.cp.registeredLocations.find { it.jcLocation?.jarOrFolder?.absolutePath?.startsWith("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes") == true }!!
-                val addMethod = vfs.javaClass.methods.find { it.name == "addClass" }!!
-                val source = LazyClassSourceImpl(loc, typeName)
-                addMethod.invoke(vfs, source)
-
-                val name = typeName.split('/')[0]
-                return ctx.cp.findType(name)
-            }
-
-            return ctx.cp.findType(typeName)
-        } catch (e : Throwable) {
-            return null
-        }
+        return obj.javaClass.toJcType(ctx)
     }
 
     private fun referenceTypeToExpr(obj: Any?, type: JcRefType): UHeapRef {
@@ -2394,7 +2569,7 @@ private class Marshall(
                 objType != null && (objType.isAssignable(type) || type is JcTypeVariable) -> objType
                 else -> type
             }
-            address = bindings.allocate(obj, mostConcreteType)!!
+            address = bindings.forceAllocate(obj, mostConcreteType)
             when {
                 type.isAssignable(usvmApiSymbolicList) -> unmarshallSymbolicList(address, obj)
                 type.isAssignable(usvmApiSymbolicMap) -> unmarshallSymbolicMap(address, obj)
@@ -2811,9 +2986,9 @@ private class JcConcreteRegionStorage(
 
 //endregion
 
-//region Concrete Memory
+//region Concrete Executor
 
-class JcThreadFactory : ThreadFactory {
+private class JcThreadFactory : ThreadFactory {
 
     private var count = 0
 
@@ -2827,16 +3002,57 @@ class JcThreadFactory : ThreadFactory {
     }
 }
 
+class Executor {
+    private val executor = Executors.newSingleThreadExecutor(JcThreadFactory())
+    private val threadLocalType by lazy { ThreadLocal::class.java }
+
+    fun execute(task: Runnable) {
+        executor.submit(task).get()
+    }
+
+    fun getThreadLocalValue(threadLocal: Any): Any? {
+        check(threadLocal.javaClass.isThreadLocal)
+        val getMethod = threadLocalType.getMethod("get")
+        var value: Any? = null
+        execute {
+            try {
+                value = getMethod.invoke(threadLocal)
+            } catch (e: Throwable) {
+                error("unable to get thread local value: $e")
+            }
+        }
+
+        return value
+    }
+
+    fun setThreadLocalValue(threadLocal: Any, value: Any?) {
+        check(threadLocal.javaClass.isThreadLocal)
+        val setMethod = threadLocalType.getMethod("set", Any::class.java)
+        execute {
+            try {
+                setMethod.invoke(threadLocal, value)
+            } catch (e: Throwable) {
+                error("unable to set thread local value: $e")
+            }
+        }
+    }
+}
+
+//endregion
+
+//region Concrete Memory
+
 class JcConcreteMemory private constructor(
     private val ctx: JcContext,
     typeConstraints: UTypeConstraints<JcType>,
     stack: URegistersStack,
     mocks: UIndexedMocker<JcMethod>,
     regions: PersistentMap<UMemoryRegionId<*, *>, UMemoryRegion<*, *>>,
-    private val executor: ExecutorService,
+    private val executor: Executor,
     private val bindings: JcConcreteMemoryBindings,
+    private val statics: MutableList<JcClassOrInterface>,
     private var regionStorageVar: JcConcreteRegionStorage? = null,
-    private var marshallVar: Marshall? = null
+    private var marshallVar: Marshall? = null,
 ) : UMemory<JcType, JcMethod>(ctx, typeConstraints, stack, mocks, regions), JcConcreteRegionGetter {
 
     private val ansiReset: String = "\u001B[0m"
@@ -2963,47 +3179,15 @@ class JcConcreteMemory private constructor(
         return ctx.mkConcreteHeapRef(address)
     }
 
-    private val forcedAllocationTypes = setOf(
-        "org.springframework.web.bind.ServletRequestParameterPropertyValues",
-        "org.springframework.web.context.support.ServletRequestHandledEvent",
-        "java.lang.Class",
-        "org.springframework.core.annotation.AnnotatedMethod",
-        "org.springframework.core.annotation.SynthesizingMethodParameter",
-        "org.thymeleaf.context.WebExpressionContext",
-        "org.thymeleaf.EngineConfiguration",
-        "org.thymeleaf.spring6.view.ThymeleafViewResolver",
-        "org.springframework.web.servlet.view.AbstractCachingViewResolver",
-        "java.util.Locale",
-    )
-
-    private fun shouldForceAllocation(type: JcType): Boolean {
-//        return type.typeName.startsWith("org.thymeleaf") || type.typeName.startsWith("org.springframework.web.servlet.view") || // TODO: delete
-//                forcedAllocationTypes.contains(type.typeName) ||
-//                type.isAssignable(throwableType)
-                // TODO: optimize forcedAllocationTypes via allowing all
-            return !type.typeName.startsWith("org.usvm.api.") &&
-                    !type.typeName.startsWith("generated.") &&
-                    !type.typeName.startsWith("stub.") &&
-                    !type.typeName.startsWith("runtime.")
-    }
-
     override fun allocConcrete(type: JcType): UConcreteHeapRef {
-        val address =
-            if (bindings.isWritable || shouldForceAllocation(type))
-                bindings.allocateDefaultConcrete(type)
-            else null
-        if (!bindings.isWritable && address != null)
-            println(ansiCyan + "[Alloc] Can be added to forcedAllocationTypes: ${type.typeName}" + ansiReset)
+        val address = bindings.allocateDefaultConcrete(type)
         if (address != null)
             return ctx.mkConcreteHeapRef(address)
         return super.allocConcrete(type)
     }
 
     override fun allocStatic(type: JcType): UConcreteHeapRef {
-        val address =
-            if (bindings.isWritable || shouldForceAllocation(type))
-                bindings.allocateDefaultStatic(type)
-            else null
+        val address = bindings.allocateDefaultStatic(type)
         if (address != null)
             return ctx.mkConcreteHeapRef(address)
         return super.allocStatic(type)
@@ -3049,7 +3233,8 @@ class JcConcreteMemory private constructor(
         check(!concretization)
 
         bindings.makeNonWritable()
-        println(ansiBlue + "Concrete memory is non writable!" + ansiReset)
+
+        println(ansiBlue + "Forked" + ansiReset)
         val stack = stack.clone()
         val mocks = mocks.clone()
         val regions = regions.build()
@@ -3062,6 +3247,7 @@ class JcConcreteMemory private constructor(
             regions,
             executor,
             bindings,
+            statics,
             regionStorage,
             marshall
         )
@@ -3094,7 +3280,7 @@ class JcConcreteMemory private constructor(
         return !forbiddenInvocations.contains(signature) &&
                 (
                         concreteNonMutatingInvocations.contains(signature) ||
-                        bindings.isWritable && concreteMutatingInvocations.contains(signature) ||
+                        bindings.state.isWritable() && concreteMutatingInvocations.contains(signature) ||
                         method.isConstructor && method.enclosingClass.toType().isAssignable(throwableType)
                 )
     }
@@ -3207,24 +3393,20 @@ class JcConcreteMemory private constructor(
         }
     }
 
-    // TODO: no mutable statics! Delete! #CM
-    // TODO: collect classes, where where writes and initialize via JcConcreteMemoryClassLoader.loadClass(field.enclosingClass)
-    // TODO: maybe in executor #CM (make function 'callStaticInit')
     private fun concretizeStatics(jcConcretizer: JcConcretizer) {
         println(ansiGreen + "Concretizing statics" + ansiReset)
         val statics = regionStorage.allMutatedStaticFields()
-        // TODO: optimize
+        // TODO: redo #CM
         statics.forEach { (field, value) ->
             val javaField = field.toJavaField
-            if (javaField != null && !field.isFinal) {
+            if (javaField != null) {
                 val typedField = field.typedField
                 val concretizedValue = jcConcretizer.resolveExpr(value, typedField.type)
-                JcConcreteMemoryClassLoader.loadClass(field.enclosingClass)
-                val currentValue = field.getFieldValue(JcConcreteMemoryClassLoader, null)
-                if (concretizedValue != currentValue) {
-                    // TODO: remember field and current value #CM
-                    field.setFieldValue(JcConcreteMemoryClassLoader, null, concretizedValue)
-                }
+                // TODO: need to call clinit? #CM
+                ensureClinit(field.enclosingClass)
+                val currentValue = javaField.getStaticFieldValue()
+                if (concretizedValue != currentValue)
+                    javaField.setStaticFieldValue(concretizedValue)
             }
         }
     }
@@ -3240,10 +3422,16 @@ class JcConcreteMemory private constructor(
         // TODO: (3) finish current state: add new path selector (after concretization it will finish current path)
         // TODO: (4) roll back changes after path finish via remembered objects
         val concretizer = JcConcretizer(state)
-        if (!concretization)
-            concretizeStatics(concretizer)
 
-        concretization = true
+        bindings.makeMutableWithBacktrack()
+
+        bindings.addStaticsToBacktrack(statics)
+
+        if (!concretization) {
+            concretizeStatics(concretizer)
+            concretization = true
+        }
+
         val parameterInfos = method.parameters
         var parameters = stmt.arguments
         val isStatic = method.isStatic
@@ -3275,14 +3463,14 @@ class JcConcreteMemory private constructor(
     }
 
     private fun ensureClinit(type: JcClassOrInterface) {
-        executor.submit {
+        executor.execute {
             try {
                 // Loading type and executing its class initializer
                 JcConcreteMemoryClassLoader.loadClass(type)
             } catch (e: Throwable) {
                 error("clinit should not throw exceptions")
             }
-        }.get()
+        }
     }
 
     private fun unfoldException(e: Throwable): Throwable {
@@ -3305,13 +3493,13 @@ class JcConcreteMemory private constructor(
         try {
             var resultObj: Any? = null
             var exception: Throwable? = null
-            executor.submit {
+            executor.execute {
                 try {
                     resultObj = method.invoke(JcConcreteMemoryClassLoader, thisObj, objParameters)
                 } catch (e: Throwable) {
                     exception = unfoldException(e)
                 }
-            }.get()
+            }
 
             if (exception == null) {
                 // No exception
@@ -3335,6 +3523,8 @@ class JcConcreteMemory private constructor(
                 val e = exception!!
                 val jcType = ctx.jcTypeOf(e)
                 println("Exception ${e.javaClass} with message ${e.message}")
+                if (e.message == "No current ServletRequestAttributes")
+                    println()
                 val exceptionObj = allocateObject(e, jcType)
                 state.throwExceptionWithoutStackFrameDrop(exceptionObj, jcType)
             }
@@ -3363,11 +3553,13 @@ class JcConcreteMemory private constructor(
         val signature = method.humanReadableSignature
 
         if (method.isClassInitializer) {
+            statics.add(method.enclosingClass)
             if (shouldNotInvokeClinit(method))
                 // Executing clinit symbolically
                 return false
 
             // Executing clinit concretely
+            println(ansiGreen + "Invoking $signature" + ansiReset)
             ensureClinit(method.enclosingClass)
             state.skipMethodInvocationWithValue(stmt, ctx.voidValue)
             return true
@@ -3378,7 +3570,7 @@ class JcConcreteMemory private constructor(
             return true
         }
 
-        if (!bindings.isWritable && concreteMutatingInvocations.contains(signature)) {
+        if (!bindings.state.isWritable() && concreteMutatingInvocations.contains(signature)) {
             // TODO: delete this
             // TODO: !shouldInvoke(signature) will do the thing #CM
             return false
@@ -3419,7 +3611,18 @@ class JcConcreteMemory private constructor(
                 println(ansiYellow + "Can be added $signature" + ansiReset)
             return false
         }
-        println(ansiGreen + "Invoking $signature" + ansiReset)
+
+        if (bindings.state.isBacktrack()) {
+            // TODO: if method if not mutating, backtrack is useless #CM
+            bindings.addObjectToBacktrackRec(thisObj)
+            for (arg in objParameters)
+                bindings.addObjectToBacktrackRec(thisObj)
+            bindings.addStaticsToBacktrack(statics)
+            println(ansiGreen + "Invoking (B) $signature" + ansiReset)
+        } else {
+            println(ansiGreen + "Invoking $signature" + ansiReset)
+        }
+
         invoke(state, exprResolver, stmt, method, thisObj, objParameters)
 
         return true
@@ -3433,7 +3636,8 @@ class JcConcreteMemory private constructor(
         // If constructor was not invoked and memory is not writable, deleting default 'this' from concrete memory:
         // + No need to encode objects in inconsistent state (created via allocConcrete -- objects with default fields)
         // - During symbolic execution, 'this' may stay concrete
-        if (!bindings.isWritable && !success && stmt.method.isConstructor) {
+        if (!bindings.state.isWritable() && !success && stmt.method.isConstructor) {
+            // TODO: only if arguments are symbolic? #CM
             val thisArg = stmt.arguments[0]
             if (thisArg is UConcreteHeapRef && bindings.contains(thisArg.address))
                 bindings.remove(thisArg.address)
@@ -3442,9 +3646,13 @@ class JcConcreteMemory private constructor(
         return success
     }
 
-    fun endConcretize() {
-        concretization = false
+    fun kill() {
+        bindings.state.state = JcConcreteMemoryState.Dead
         bindings.applyBacktrack()
+    }
+
+    fun enableBacktrack() {
+        bindings.makeMutableWithBacktrack()
     }
 
     //endregion
@@ -3455,12 +3663,12 @@ class JcConcreteMemory private constructor(
             ctx: JcContext,
             typeConstraints: UTypeConstraints<JcType>,
         ): JcConcreteMemory {
-            val bindings = JcConcreteMemoryBindings(ctx, typeConstraints)
+            val executor = Executor()
+            val bindings = JcConcreteMemoryBindings(ctx, typeConstraints, { threadLocal: Any -> executor.getThreadLocalValue(threadLocal) }, { threadLocal: Any, value: Any? -> executor.setThreadLocalValue(threadLocal, value) })
             val stack = URegistersStack()
             val mocks = UIndexedMocker<JcMethod>()
             val regions: PersistentMap<UMemoryRegionId<*, *>, UMemoryRegion<*, *>> = persistentMapOf()
-            val executor = Executors.newSingleThreadExecutor(JcThreadFactory())
-            val memory = JcConcreteMemory(ctx, typeConstraints, stack, mocks, regions, executor, bindings)
+            val memory = JcConcreteMemory(ctx, typeConstraints, stack, mocks, regions, executor, bindings, mutableListOf())
             val storage = JcConcreteRegionStorage(ctx, memory)
             val marshall = Marshall(ctx, bindings, storage)
             memory.regionStorageVar = storage
@@ -3493,8 +3701,6 @@ class JcConcreteMemory private constructor(
             "java.lang.Object#<init>():void",
             "org.springframework.boot.test.context.SpringBootContextLoader#loadContext(org.springframework.test.context.MergedContextConfiguration,org.springframework.boot.test.context.SpringBootContextLoader\$Mode,org.springframework.context.ApplicationContextInitializer):org.springframework.context.ApplicationContext",
             "org.apache.commons.logging.LogFactory#getLog(java.lang.Class):org.apache.commons.logging.Log",
-            "java.lang.ThreadLocal#set(java.lang.Object):void",
-            "java.lang.ThreadLocal#<init>():void",
             "org.springframework.boot.SpringApplication#printBanner(org.springframework.core.env.ConfigurableEnvironment):org.springframework.boot.Banner",
             "org.springframework.boot.SpringApplication#afterRefresh(org.springframework.context.ConfigurableApplicationContext,org.springframework.boot.ApplicationArguments):void",
             "org.springframework.boot.SpringApplication#startAnalysis():void",
@@ -3623,6 +3829,11 @@ class JcConcreteMemory private constructor(
             "org.springframework.core.io.DefaultResourceLoader#getProtocolResolvers():java.util.Collection",
             "org.springframework.boot.SpringApplication#endOfPathAnalysis():void",
             "org.springframework.boot.SpringApplication#println(java.lang.String):void",
+            "java.lang.String#_currentCoder():byte",
+            "java.lang.StringBuilder#_checkSeqBounds(java.lang.CharSequence,int,int):void",
+            "java.lang.StringBuilder#_checkRangeBounds(int,int,int):void",
+            "java.lang.StringBuilder#_getString(java.lang.CharSequence):java.lang.String",
+            "java.util.AbstractMap#_addAllElements(java.util.Map):void",
         )
 
         private val concreteMutatingInvocations = setOf(
@@ -3784,7 +3995,6 @@ class JcConcreteMemory private constructor(
             "org.springframework.web.servlet.support.WebContentGenerator#prepareResponse(jakarta.servlet.http.HttpServletResponse):void",
             "org.springframework.web.servlet.DispatcherServlet#applyDefaultViewName(jakarta.servlet.http.HttpServletRequest,org.springframework.web.servlet.ModelAndView):void",
             "org.springframework.web.servlet.HandlerExecutionChain#applyPostHandle(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.ModelAndView):void",
-            "org.springframework.web.servlet.DispatcherServlet#processDispatchResult(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.HandlerExecutionChain,org.springframework.web.servlet.ModelAndView,java.lang.Exception):void",
             "org.springframework.web.util.ServletRequestPathUtils#setParsedRequestPath(org.springframework.http.server.RequestPath,jakarta.servlet.ServletRequest):void",
             "org.springframework.web.servlet.FrameworkServlet#resetContextHolders(jakarta.servlet.http.HttpServletRequest,org.springframework.context.i18n.LocaleContext,org.springframework.web.context.request.RequestAttributes):void",
             "org.springframework.web.context.request.AbstractRequestAttributes#requestCompleted():void",
@@ -3840,9 +4050,14 @@ class JcConcreteMemory private constructor(
             "java.util.AbstractMap#putAll(java.util.Map):void",
             "java.util.HashMap#forEach(java.util.function.BiConsumer):void",
             "java.util.AbstractMap#forEach(java.util.function.BiConsumer):void",
+            "java.lang.ThreadLocal#set(java.lang.Object):void",
             "java.lang.ThreadLocal#remove():void",
             "org.springframework.context.i18n.LocaleContextHolder#setLocale(java.util.Locale,boolean):void",
             "org.springframework.context.i18n.LocaleContextHolder#setLocaleContext(org.springframework.context.i18n.LocaleContext,boolean):void",
+            "org.springframework.web.bind.ServletRequestDataBinder#bind(jakarta.servlet.ServletRequest):void",
+            "org.springframework.ui.ModelMap#addAllAttributes(java.util.Map):org.springframework.ui.ModelMap",
+            "java.util.concurrent.ConcurrentHashMap#computeIfAbsent(java.lang.Object,java.util.function.Function):java.lang.Object",
+            "java.util.LinkedHashMap#putAll(java.util.Map):void",
         )
 
         private val concreteNonMutatingInvocations = setOf(
@@ -4293,6 +4508,11 @@ class JcConcreteMemory private constructor(
             "java.lang.Character#<init>(char):void",
             "org.springframework.http.server.PathContainer\$Options#separator():char",
             "org.springframework.web.util.UrlPathHelper#removeSemicolonContent(java.lang.String):java.lang.String",
+            "java.lang.String#<init>(byte[]):void",
+            "org.springframework.core.annotation.AnnotatedMethod\$ReturnValueMethodParameter#<init>(org.springframework.core.annotation.AnnotatedMethod,java.lang.Object):void",
+            "org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite#selectHandler(java.lang.Object,org.springframework.core.MethodParameter):org.springframework.web.method.support.HandlerMethodReturnValueHandler",
+            "org.springframework.web.servlet.mvc.method.annotation.ModelAndViewMethodReturnValueHandler#supportsReturnType(org.springframework.core.MethodParameter):boolean",
+            "org.springframework.core.annotation.AnnotatedMethod\$ReturnValueMethodParameter#getParameterType():java.lang.Class",
             // TODO: be careful: all methods below are mutating, but maybe it's insufficient #CM
             "java.lang.StringBuilder#append(java.lang.Object):java.lang.StringBuilder",
             "org.springframework.web.method.support.HandlerMethodArgumentResolverComposite#supportsParameter(org.springframework.core.MethodParameter):boolean",
@@ -4332,6 +4552,7 @@ class JcConcreteMemory private constructor(
 
         private val concretizeInvocations = setOf(
             "org.springframework.test.web.servlet.TestDispatcherServlet#render(org.springframework.web.servlet.ModelAndView,jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.DispatcherServlet#processDispatchResult(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.HandlerExecutionChain,org.springframework.web.servlet.ModelAndView,java.lang.Exception):void",
         )
 
         //endregion

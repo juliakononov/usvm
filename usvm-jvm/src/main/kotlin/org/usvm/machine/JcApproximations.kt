@@ -619,7 +619,7 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("startAnalysis")) {
+        if (methodName.equals("_startAnalysis")) {
             scope.doWithState {
                 println("starting, state.id = $id")
                 val framesToDrop = callStack.size - 1
@@ -631,9 +631,9 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("endOfPathAnalysis")) {
+        if (methodName.equals("_endOfPathAnalysis")) {
             scope.doWithState {
-                (memory as JcConcreteMemory).endConcretize()
+                (memory as JcConcreteMemory).kill()
                 // TODO: generate test #CM
                 skipMethodInvocationWithValue(methodCall, ctx.voidValue)
             }
@@ -641,7 +641,16 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("allControllerPaths")) {
+        if (methodName.equals("_startOfPathAnalysis")) {
+            scope.doWithState {
+                (memory as JcConcreteMemory).enableBacktrack()
+                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
+            }
+
+            return true
+        }
+
+        if (methodName.equals("_allControllerPaths")) {
             val allControllerPaths = allControllerPaths()
             scope.doWithState {
                 val type = allControllerPaths.javaClass
@@ -653,7 +662,7 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("println")) {
+        if (methodName.equals("_println")) {
             scope.doWithState {
                 val messageExpr = methodCall.arguments[1].asExpr(ctx.addressSort) as UConcreteHeapRef
                 val message = memory.tryHeapRefToObject(messageExpr) as String

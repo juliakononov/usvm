@@ -87,6 +87,7 @@ dependencies {
     // Use usvm-api in samples for makeSymbolic, assume, etc.
     samplesImplementation(`usvm-api`.output)
 
+    implementation(project(":usvm-jvm-instrumentation"))
     testImplementation(project(":usvm-jvm-instrumentation"))
 }
 
@@ -301,6 +302,10 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "sun.reflect.annotation")
         openPackage("java.base", "sun.nio.cs")
         openPackage("java.base", "java.nio")
+        openPackage("java.logging", "java.util.logging")
+        openPackage("java.base", "java.time.format")
+        openPackage("java.base", "java.time.zone")
+        openPackage("java.base", "java.time.temporal")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")
         exportPackage("java.base", "jdk.internal.reflect")
