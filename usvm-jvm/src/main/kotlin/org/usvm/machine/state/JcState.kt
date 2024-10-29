@@ -39,6 +39,7 @@ class JcState(
 ) {
 
     override fun clone(newConstraints: UPathConstraints<JcType>?): JcState {
+        println("\u001B[34m" + "Forked on method ${callStack.lastMethod()}" + "\u001B[0m")
         val clonedConstraints = newConstraints ?: pathConstraints.clone()
         return JcState(
             ctx,

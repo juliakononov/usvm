@@ -109,6 +109,7 @@ import kotlin.collections.ArrayList
 class JcMethodApproximationResolver(
     private val ctx: JcContext,
     private val applicationGraph: JcApplicationGraph,
+    private val options: JcMachineOptions,
 ) {
     private var currentScope: JcStepScope? = null
     private val scope: JcStepScope
@@ -529,19 +530,16 @@ class JcMethodApproximationResolver(
     }
 
     private fun allControllerPaths(): Map<String, Map<String, List<Any>>> {
+        val locations = options.projectLocations!!
         val controllerTypes =
-            ctx.cp.locations
+            locations
                 .asSequence()
                 .flatMap { it.classNames ?: emptySet() }
                 .mapNotNull { ctx.cp.findClassOrNull(it) }
                 .filterNot { it is JcUnknownClass }
-                // TODO: filter deps classes #Spring use JcMachineOptions.projectLocations
-                .filter { it.declaration.location.path.equals("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes") }
                 .filter {
                     !it.isAbstract && !it.isInterface && !it.isAnonymous && it.annotations.any {
-                        it.name.equals(
-                            "org.springframework.stereotype.Controller"
-                        )
+                        it.name == "org.springframework.stereotype.Controller"
                     }
                 }.toList()
         val result = TreeMap<String, Map<String, List<Any>>>()
@@ -1444,6 +1442,11 @@ class JcMethodApproximationResolver(
     }
 
     private fun approximateUsvmApiEngineStaticMethod(methodCall: JcMethodCall) {
+        // TODO: unexpected clinit #Valya #CM
+        if (methodCall.method.isClassInitializer) {
+            scope.doWithState { skipMethodInvocationWithValue(methodCall, ctx.voidValue) }
+            return
+        }
         val methodApproximation = usvmApiEngineMethods[methodCall.method.name]
             ?: error("Unexpected engine api method: ${methodCall.method.name}")
         val result = methodApproximation(methodCall) ?: return
