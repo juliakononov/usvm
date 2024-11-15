@@ -17,8 +17,8 @@ import java.util.jar.JarFile
 /**
  * Loads known classes using [ClassLoader.getSystemClassLoader], or defines them using bytecode from jacodb if they are unknown.
  */
-object JcConcreteMemoryClassLoader : SecureClassLoader(ClassLoader.getSystemClassLoader()) {
-    // TODO: make this 'class', change name and rollback changes to original JcClassLoader
+// TODO: make this 'class'
+internal object JcConcreteMemoryClassLoader : SecureClassLoader(ClassLoader.getSystemClassLoader()) {
 
     var webApplicationClass: JcClassOrInterface? = null
     lateinit var cp: JcClasspath

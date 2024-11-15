@@ -317,6 +317,7 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "sun.net.www.protocol.jar")
         openPackage("java.base", "java.util.jar")
         openPackage("java.base", "java.nio.file.attribute")
+        openPackage("java.base", "java.util.function")
         openPackage("java.desktop", "java.beans")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")

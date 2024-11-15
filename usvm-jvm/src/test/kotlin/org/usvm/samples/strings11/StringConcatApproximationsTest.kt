@@ -20,4 +20,22 @@ class StringConcatApproximationsTest : ApproximationsTestRunner() {
             invariants = arrayOf({ _, _, _, r -> r.getOrNull() == true })
         )
     }
+
+    @Test
+    fun testConcatArguments1() {
+        checkDiscoveredPropertiesWithExceptions(
+            StringConcat::wip,
+            ignoreNumberOfAnalysisResults,
+            invariants = arrayOf({ _, r -> r.getOrNull() == true })
+        )
+    }
+
+    @Test
+    fun testConcatArguments2() {
+        checkDiscoveredPropertiesWithExceptions(
+            StringConcat::kek,
+            ignoreNumberOfAnalysisResults,
+            invariants = arrayOf({ _, r -> r.getOrNull() == true })
+        )
+    }
 }

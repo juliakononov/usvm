@@ -16,6 +16,7 @@ import org.usvm.forkblacklists.UForkBlackList
 import org.usvm.machine.interpreter.JcInterpreter
 import org.usvm.machine.state.JcMethodResult
 import org.usvm.machine.state.JcState
+import org.usvm.machine.state.concreteMemory.ps.JcConcreteMemoryPathSelector
 import org.usvm.machine.state.lastStmt
 import org.usvm.ps.createPathSelector
 import org.usvm.statistics.CompositeUMachineObserver
@@ -96,7 +97,7 @@ class JcMachine(
         val timeStatistics = TimeStatistics<JcMethod, JcState>()
         val loopTracker = JcLoopTracker()
 
-        val pathSelector = createPathSelector(
+        var pathSelector = createPathSelector(
             initialStates,
             options,
             applicationGraph,
@@ -106,6 +107,7 @@ class JcMachine(
             { callGraphStatistics },
             { loopTracker }
         )
+        pathSelector = JcConcreteMemoryPathSelector(pathSelector)
 
         val statesCollector =
             when (options.stateCollectionStrategy) {

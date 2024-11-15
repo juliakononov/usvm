@@ -6,7 +6,6 @@ import org.jacodb.api.jvm.JcClassOrInterface
 import org.jacodb.api.jvm.JcClasspath
 import org.jacodb.api.jvm.JcDatabase
 import org.jacodb.api.jvm.JcMethod
-import org.jacodb.api.jvm.RegisteredLocation
 import org.jacodb.api.jvm.cfg.JcRawAssignInst
 import org.jacodb.api.jvm.cfg.JcRawClassConstant
 import org.jacodb.api.jvm.ext.findClass
@@ -191,7 +190,7 @@ private fun generateTestClass(benchmark: BenchCp): BenchCp {
 
 private fun analyzeBench(benchmark: BenchCp) {
     val options = UMachineOptions(
-        pathSelectionStrategies = listOf(PathSelectionStrategy.DFS),
+        pathSelectionStrategies = listOf(PathSelectionStrategy.BFS),
         coverageZone = CoverageZone.TRANSITIVE,
         exceptionsPropagation = true,
         timeout = Duration.INFINITE,

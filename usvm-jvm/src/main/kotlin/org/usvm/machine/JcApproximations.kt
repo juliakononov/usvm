@@ -30,6 +30,7 @@ import org.jacodb.api.jvm.ext.float
 import org.jacodb.api.jvm.ext.ifArrayGetElementType
 import org.jacodb.api.jvm.ext.int
 import org.jacodb.api.jvm.ext.isEnum
+import org.jacodb.api.jvm.ext.isSubClassOf
 import org.jacodb.api.jvm.ext.long
 import org.jacodb.api.jvm.ext.objectClass
 import org.jacodb.api.jvm.ext.objectType
@@ -91,6 +92,7 @@ import kotlin.reflect.KFunction1
 import kotlin.reflect.KFunction2
 import kotlin.reflect.jvm.javaMethod
 import org.usvm.api.makeNullableSymbolicRefWithSameType
+import org.usvm.api.makeSymbolicRefSubtype
 import org.usvm.api.readArrayIndex
 import org.usvm.api.readArrayLength
 import org.usvm.api.readField
@@ -186,6 +188,11 @@ class JcMethodApproximationResolver(
 
         if (className.contains("org.springframework.boot")) {
             if (approximateSpringBootMethod(methodCall)) return true
+        }
+
+        val repositoryType = ctx.cp.findClassOrNull("org.springframework.data.repository.Repository")
+        if (repositoryType != null && enclosingClass.isSubClassOf(repositoryType)) {
+            if (approximateSpringRepositoryMethod(methodCall)) return true
         }
 
         if (className.contains("java.lang.reflect.Method")) {
@@ -629,25 +636,6 @@ class JcMethodApproximationResolver(
             return true
         }
 
-        if (methodName.equals("_endOfPathAnalysis")) {
-            scope.doWithState {
-                (memory as JcConcreteMemory).kill()
-                // TODO: generate test #CM
-                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
-            }
-
-            return true
-        }
-
-        if (methodName.equals("_startOfPathAnalysis")) {
-            scope.doWithState {
-                (memory as JcConcreteMemory).enableBacktrack()
-                skipMethodInvocationWithValue(methodCall, ctx.voidValue)
-            }
-
-            return true
-        }
-
         if (methodName.equals("_allControllerPaths")) {
             val allControllerPaths = allControllerPaths()
             scope.doWithState {
@@ -672,6 +660,16 @@ class JcMethodApproximationResolver(
         }
 
         return false
+    }
+
+    private fun approximateSpringRepositoryMethod(methodCall: JcMethodCall): Boolean = with(methodCall) {
+        val returnType = ctx.cp.findTypeOrNull(methodCall.method.returnType.typeName)!!
+        val mockedValue = scope.makeSymbolicRefSubtype(returnType)!!
+        println("[Mocked] Mocked repository method")
+        scope.doWithState {
+            skipMethodInvocationWithValue(methodCall, mockedValue)
+        }
+        return true
     }
 
     private fun approximateMethodMethod(methodCall: JcMethodCall): Boolean = with(methodCall) {
