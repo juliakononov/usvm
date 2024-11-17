@@ -360,16 +360,23 @@ internal class JcConcreteMemoryBindings private constructor(
         return ctx.addressCounter.freshAllocatedAddress()
     }
 
+    private fun internIfNeeded(obj: Any): Any {
+        return when (obj) {
+            is String -> obj.intern()
+            else -> obj
+        }
+    }
     private fun allocate(obj: Any, type: JcType, static: Boolean): UConcreteHeapAddress {
+        val interned = internIfNeeded(obj)
         if (interningTypes.contains(type)) {
-            val address = tryPhysToVirt(obj)
+            val address = tryPhysToVirt(interned)
             if (address != null) {
                 return address
             }
         }
 
         val address = createNewAddress(type, static)
-        allocate(address, obj, type)
+        allocate(address, interned, type)
         return address
     }
 

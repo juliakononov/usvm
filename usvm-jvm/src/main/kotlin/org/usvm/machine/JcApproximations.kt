@@ -26,6 +26,7 @@ import org.jacodb.api.jvm.ext.char
 import org.jacodb.api.jvm.ext.double
 import org.jacodb.api.jvm.ext.findClass
 import org.jacodb.api.jvm.ext.findClassOrNull
+import org.jacodb.api.jvm.ext.findType
 import org.jacodb.api.jvm.ext.float
 import org.jacodb.api.jvm.ext.ifArrayGetElementType
 import org.jacodb.api.jvm.ext.int
@@ -536,6 +537,12 @@ class JcMethodApproximationResolver(
         return value[0] as String
     }
 
+    private fun pathVarNameFromAnnotation(annotation: JcAnnotation): String {
+        val values = annotation.values
+        assert(values.size == 1)
+        return values["value"] as String
+    }
+
     private fun allControllerPaths(): Map<String, Map<String, List<Any>>> {
         val locations = options.projectLocations!!
         val controllerTypes =
@@ -567,6 +574,30 @@ class JcMethodApproximationResolver(
 
                     if (kind != null) {
                         val path = pathFromAnnotation(annotation)
+//                        var startIndex = 0
+//                        var found: Boolean
+//                        val types = mutableListOf<Class<*>>()
+//                        val parameters = method.parameters
+//                        do {
+//                            val currentStartIndex = path.indexOf('{', startIndex)
+//                            found = currentStartIndex != -1
+//                            if (found) {
+//                                startIndex = currentStartIndex + 1
+//                                val currentEndIndex = path.indexOf('}', startIndex)
+//                                check(currentEndIndex != -1)
+//                                val varName = path.substring(startIndex, currentEndIndex)
+//                                for (p in parameters) {
+//                                    val pathVarAnnotation = p.annotations.find {
+//                                        it.name == "org.springframework.web.bind.annotation.PathVariable"
+//                                    }
+//                                    if (pathVarAnnotation != null && pathVarNameFromAnnotation(pathVarAnnotation) == varName) {
+//                                        val type = ctx.cp.findType(p.type.typeName).toJavaClass(JcConcreteMemoryClassLoader)
+//                                        types.add(type)
+//                                    }
+//                                }
+//                            }
+//                        } while (found)
+//                        val properties = listOf(kind, types)
                         val pathArgsCount = path.filter { it == '{' }.length
                         val properties = listOf(kind, Integer.valueOf(pathArgsCount))
                         paths[path] = properties

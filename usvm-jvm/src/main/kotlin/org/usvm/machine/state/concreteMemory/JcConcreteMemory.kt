@@ -538,8 +538,6 @@ class JcConcreteMemory private constructor(
                 bindings.effectStorage.addObjectToEffectRec(thisObj)
         }
 
-        if (method.humanReadableSignature == "org.springframework.web.servlet.DispatcherServlet#processDispatchResult(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.HandlerExecutionChain,org.springframework.web.servlet.ModelAndView,java.lang.Exception):void")
-            println()
         var thisArg = thisObj
         try {
             var resultObj: Any? = null
@@ -793,7 +791,14 @@ class JcConcreteMemory private constructor(
             "org.springframework.test.web.servlet.TestDispatcherServlet#service(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
             "org.springframework.web.servlet.FrameworkServlet#service(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
             "jakarta.servlet.http.HttpServlet#service(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+
             "org.springframework.web.servlet.FrameworkServlet#doGet(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.FrameworkServlet#doPost(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.FrameworkServlet#doPut(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.FrameworkServlet#doDelete(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.FrameworkServlet#doOptions(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+            "org.springframework.web.servlet.FrameworkServlet#doTrace(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
+
             "org.springframework.web.servlet.FrameworkServlet#processRequest(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
             "org.springframework.web.servlet.DispatcherServlet#doService(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",
             "org.springframework.web.servlet.DispatcherServlet#doDispatch(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse):void",

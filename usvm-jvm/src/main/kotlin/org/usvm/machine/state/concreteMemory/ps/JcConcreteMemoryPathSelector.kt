@@ -33,6 +33,7 @@ class JcConcreteMemoryPathSelector(
     }
 
     override fun remove(state: JcState) {
+        // TODO: care about Engine.assume -- it's fork, but else state of assume is useless #CM
         check(fixedState == state)
         fixedState = null
         selector.remove(state)
