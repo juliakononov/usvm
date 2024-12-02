@@ -16,6 +16,7 @@ import org.jacodb.api.jvm.ext.findTypeOrNull
 import org.jacodb.api.jvm.ext.humanReadableSignature
 import org.jacodb.api.jvm.ext.int
 import org.jacodb.api.jvm.ext.isEnum
+import org.jacodb.api.jvm.ext.isSubClassOf
 import org.jacodb.api.jvm.ext.objectType
 import org.jacodb.api.jvm.ext.toType
 import org.jacodb.approximation.JcEnrichedVirtualMethod
@@ -298,6 +299,13 @@ class JcConcreteMemory private constructor(
 
     //region Concrete Invoke
 
+    private fun shouldNotInvoke(method: JcMethod): Boolean {
+        return forbiddenInvocations.contains(method.humanReadableSignature) ||
+                ctx.cp.findClassOrNull("jakarta.servlet.Filter").let {
+                    it != null && method.enclosingClass.isSubClassOf(it) && method.name == "doFilter"
+                }
+    }
+
     private fun methodIsInvokable(method: JcMethod): Boolean {
         return !(
                     method.isConstructor && method.enclosingClass.isAbstract ||
@@ -308,9 +316,9 @@ class JcConcreteMemory private constructor(
                         it.startsWith("org.usvm.api.") ||
                         it.startsWith("runtime.LibSLRuntime") ||
                         it.startsWith("generated.") ||
-                        it.startsWith("stub.") ||
-                        forbiddenInvocations.contains(it)
-                    }
+                        it.startsWith("stub.")
+                    } ||
+                    shouldNotInvoke(method)
                 )
     }
 
@@ -341,8 +349,8 @@ class JcConcreteMemory private constructor(
 
             if (bindings.contains(addressInModel)) {
                 val obj = bindings.tryFullyConcrete(addressInModel)
-                check(obj != null)
-                return obj
+                if (obj != null)
+                    return obj
             }
 
             if (heapRef !is UConcreteHeapRef)
@@ -404,7 +412,7 @@ class JcConcreteMemory private constructor(
                     ?: error("resolveConcreteObject: can not find field $field")
                 val fieldType = jcField.type
                 val fieldSort = ctx.typeToSort(fieldType)
-                val value = readField(ref, jcField, fieldSort)
+                val value = readField(ref, jcField.field, fieldSort)
                 val resolved = resolveExpr(value, fieldType)
                 field.setFieldValue(obj, resolved)
             }
@@ -607,6 +615,8 @@ class JcConcreteMemory private constructor(
     ): TryConcreteInvokeResult {
         val method = stmt.method
         val arguments = stmt.arguments
+        if (method.humanReadableSignature == "java.lang.IllegalArgumentException#<init>(java.lang.String):void")
+            println()
         if (!methodIsInvokable(method))
             return TryConcreteInvokeFail(false)
 
@@ -781,8 +791,6 @@ class JcConcreteMemory private constructor(
             "org.springframework.boot.SpringApplication#afterRefresh(org.springframework.context.ConfigurableApplicationContext,org.springframework.boot.ApplicationArguments):void",
             "org.springframework.test.web.servlet.MockMvc#perform(org.springframework.test.web.servlet.RequestBuilder):org.springframework.test.web.servlet.ResultActions",
             "org.springframework.mock.web.MockFilterChain#doFilter(jakarta.servlet.ServletRequest,jakarta.servlet.ServletResponse):void",
-            // TODO: do not invoke any filter.doFilter #CM
-            "org.springframework.web.filter.OncePerRequestFilter#doFilter(jakarta.servlet.ServletRequest,jakarta.servlet.ServletResponse,jakarta.servlet.FilterChain):void",
             "org.springframework.web.filter.RequestContextFilter#doFilterInternal(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,jakarta.servlet.FilterChain):void",
             "org.springframework.web.filter.FormContentFilter#doFilterInternal(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,jakarta.servlet.FilterChain):void",
             "org.springframework.web.filter.CharacterEncodingFilter#doFilterInternal(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,jakarta.servlet.FilterChain):void",
@@ -817,6 +825,12 @@ class JcConcreteMemory private constructor(
             "org.springframework.web.method.support.InvocableHandlerMethod#doInvoke(java.lang.Object[]):java.lang.Object",
             "java.lang.reflect.Method#invoke(java.lang.Object,java.lang.Object[]):java.lang.Object",
 
+            "org.springframework.web.servlet.mvc.method.annotation.ServletModelAttributeMethodProcessor#bindRequestParameters(org.springframework.web.bind.WebDataBinder,org.springframework.web.context.request.NativeWebRequest):void",
+            "org.springframework.web.bind.ServletRequestDataBinder#bind(jakarta.servlet.ServletRequest):void",
+            "org.springframework.web.bind.WebDataBinder#doBind(org.springframework.beans.MutablePropertyValues):void",
+            "org.springframework.validation.DataBinder#doBind(org.springframework.beans.MutablePropertyValues):void",
+            "org.springframework.validation.AbstractBindingResult#getModel():java.util.Map",
+
             "java.lang.Object#<init>():void",
             "org.springframework.util.function.ThrowingSupplier#get():java.lang.Object",
             "org.springframework.util.function.ThrowingSupplier#get(java.util.function.BiFunction):java.lang.Object",
@@ -824,7 +838,7 @@ class JcConcreteMemory private constructor(
 
         private val concretizeInvocations = setOf(
             "org.springframework.web.servlet.DispatcherServlet#processDispatchResult(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.HandlerExecutionChain,org.springframework.web.servlet.ModelAndView,java.lang.Exception):void",
-            "org.usvm.samples.strings11.StringConcat#concretize():void",
+//            "org.usvm.samples.strings11.StringConcat#concretize():void",
         )
 
         //endregion

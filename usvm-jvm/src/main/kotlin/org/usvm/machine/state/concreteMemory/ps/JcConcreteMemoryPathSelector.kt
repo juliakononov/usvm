@@ -20,6 +20,7 @@ class JcConcreteMemoryPathSelector(
         val state = selector.peek()
         fixedState = state
         val memory = state.memory as JcConcreteMemory
+        println("picked state: ${state.id}")
         memory.reset()
         return state
     }
@@ -38,6 +39,7 @@ class JcConcreteMemoryPathSelector(
         fixedState = null
         selector.remove(state)
         (state.memory as JcConcreteMemory).kill()
+        println("removed state: ${state.id}")
         // TODO: generate test? #CM
     }
 }

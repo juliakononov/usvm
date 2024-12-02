@@ -319,10 +319,13 @@ tasks.register<JavaExec>("runWebBench") {
         openPackage("java.base", "java.nio.file.attribute")
         openPackage("java.base", "java.util.function")
         openPackage("java.desktop", "java.beans")
+        openPackage("java.xml", "com.sun.org.apache.xerces.internal.impl.xs")
+        openPackage("java.base", "java.math")
         exportPackage("java.base", "sun.util.locale")
         exportPackage("java.base", "jdk.internal.misc")
         exportPackage("java.base", "jdk.internal.reflect")
         exportPackage("java.base", "sun.nio.cs")
+        exportPackage("java.xml", "com.sun.org.apache.xerces.internal.impl.xs.util")
         add("--illegal-access=warn")
     }
 }

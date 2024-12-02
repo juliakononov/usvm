@@ -1,7 +1,6 @@
 package org.usvm.machine
 
 import org.jacodb.api.jvm.JcByteCodeLocation
-import org.jacodb.api.jvm.RegisteredLocation
 
 /**
  * JcMachine specific options.

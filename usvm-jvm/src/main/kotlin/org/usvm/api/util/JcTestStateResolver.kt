@@ -77,6 +77,7 @@ import org.usvm.mkSizeExpr
 import org.usvm.model.UModelBase
 import org.usvm.sizeSort
 import org.usvm.types.first
+import kotlin.time.measureTime
 
 abstract class JcTestStateResolver<T>(
     val ctx: JcContext,
@@ -444,11 +445,15 @@ abstract class JcTestStateResolver<T>(
         )
 
         val modelMapRef = evaluateInModel(heapRef)
-        val modelEntries = model.refSetEntries(modelMapRef, mapType)
-        resolveMapEntries(model, modelEntries, modelMapRef, mapType,
-            keyInModel = { !keysInModel.add(it) },
-            addModelEntry = { k, v -> resultMapAddEntry(k, v) }
-        )
+        val modelMapAddress = (modelMapRef as UConcreteHeapRef).address
+        if (modelMapAddress <= INITIAL_INPUT_ADDRESS) {
+            // Symbolic map came from input
+            val modelEntries = model.refSetEntries(modelMapRef, mapType)
+            resolveMapEntries(model, modelEntries, modelMapRef, mapType,
+                keyInModel = { !keysInModel.add(it) },
+                addModelEntry = { k, v -> resultMapAddEntry(k, v) }
+            )
+        }
 
         // todo: map length refinement loop in solver
         val mapSize = resultMapSize()
