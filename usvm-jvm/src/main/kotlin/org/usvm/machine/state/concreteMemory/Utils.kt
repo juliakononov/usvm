@@ -8,6 +8,7 @@ import org.jacodb.api.jvm.JcMethod
 import org.jacodb.api.jvm.JcPrimitiveType
 import org.jacodb.api.jvm.JcType
 import org.jacodb.api.jvm.JcTypedField
+import org.jacodb.api.jvm.JcTypedMethod
 import org.jacodb.api.jvm.ext.isEnum
 import org.jacodb.api.jvm.ext.superClasses
 import org.jacodb.api.jvm.ext.toType
@@ -128,6 +129,9 @@ internal val JcField.toJavaField: Field?
 
 internal val JcMethod.toJavaMethod: Executable?
     get() = this.toJavaExecutable(JcConcreteMemoryClassLoader)
+
+internal val JcMethod.toTypedMethod: JcTypedMethod
+    get() = enclosingClass.toType().declaredMethods.find { this == it.method }!!
 
 internal fun JcEnrichedVirtualMethod.getMethod(ctx: JcContext): JcMethod? {
     val originalClassName = OriginalClassName(enclosingClass.name)

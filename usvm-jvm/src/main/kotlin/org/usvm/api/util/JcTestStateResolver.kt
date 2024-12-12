@@ -77,7 +77,6 @@ import org.usvm.mkSizeExpr
 import org.usvm.model.UModelBase
 import org.usvm.sizeSort
 import org.usvm.types.first
-import kotlin.time.measureTime
 
 abstract class JcTestStateResolver<T>(
     val ctx: JcContext,

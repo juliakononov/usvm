@@ -343,7 +343,7 @@ class JcConcreteMemory private constructor(
 
     private inner class JcConcretizer(
         state: JcState
-    ) : JcTestStateResolver<Any?>(state.ctx, state.models.first(), state.memory, state.callStack.lastMethod().enclosingClass.toType().declaredMethods.first()) {
+    ) : JcTestStateResolver<Any?>(state.ctx, state.models.first(), state.memory, state.callStack.lastMethod().toTypedMethod) {
         override val decoderApi: JcTestInterpreterDecoderApi = JcTestInterpreterDecoderApi(ctx, JcConcreteMemoryClassLoader)
 
         override fun tryCreateObjectInstance(ref: UConcreteHeapRef, heapRef: UHeapRef): Any? {
