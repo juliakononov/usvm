@@ -203,7 +203,8 @@ private fun analyzeBench(benchmark: BenchCp) {
         JcMachineOptions(
             projectLocations = benchmark.classLocations,
             dependenciesLocations = benchmark.depsLocations,
-            forkOnImplicitExceptions = false
+            forkOnImplicitExceptions = false,
+            arrayMaxSize = 10_000
         )
     val testResolver = JcTestInterpreter()
     val newBench = generateTestClass(benchmark)

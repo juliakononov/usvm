@@ -76,7 +76,9 @@ import org.usvm.memory.UMemoryRegionId
 import org.usvm.memory.URegistersStack
 import org.usvm.mkSizeExpr
 import org.usvm.util.jcTypeOf
+import org.usvm.util.name
 import org.usvm.util.typedField
+import org.usvm.utils.applySoftConstraints
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ExecutionException
 
@@ -447,20 +449,28 @@ class JcConcreteMemory private constructor(
         }
     }
 
+    private fun shouldNotConcretizeField(field: JcField): Boolean {
+        return field.enclosingClass.name.startsWith("stub.")
+    }
+
     private fun concretizeStatics(jcConcretizer: JcConcretizer) {
         println(ansiGreen + "Concretizing statics" + ansiReset)
         val statics = regionStorage.allMutatedStaticFields()
         // TODO: redo #CM
         statics.forEach { (field, value) ->
-            val javaField = field.toJavaField
-            if (javaField != null) {
-                val typedField = field.typedField
-                val concretizedValue = jcConcretizer.resolveExpr(value, typedField.type)
-                // TODO: need to call clinit? #CM
-                ensureClinit(field.enclosingClass)
-                val currentValue = javaField.getStaticFieldValue()
-                if (concretizedValue != currentValue)
-                    javaField.setStaticFieldValue(concretizedValue)
+            if (!shouldNotConcretizeField(field)) {
+                val javaField = field.toJavaField
+                if (javaField != null) {
+                    val typedField = field.typedField
+                    val concretizedValue = jcConcretizer.withMode(ResolveMode.CURRENT) {
+                        resolveExpr(value, typedField.type)
+                    }
+                    // TODO: need to call clinit? #CM
+                    ensureClinit(field.enclosingClass)
+                    val currentValue = javaField.getStaticFieldValue()
+                    if (concretizedValue != currentValue)
+                        javaField.setStaticFieldValue(concretizedValue)
+                }
             }
         }
     }
@@ -471,6 +481,11 @@ class JcConcreteMemory private constructor(
         stmt: JcMethodCall,
         method: JcMethod,
     ) {
+        if (!concretization) {
+            // Getting better model (via soft constraints)
+            state.applySoftConstraints()
+        }
+
         val concretizer = JcConcretizer(state)
 
         bindings.makeMutableWithEffect()
@@ -615,17 +630,8 @@ class JcConcreteMemory private constructor(
     ): TryConcreteInvokeResult {
         val method = stmt.method
         val arguments = stmt.arguments
-        if (method.humanReadableSignature == "java.lang.IllegalArgumentException#<init>(java.lang.String):void")
-            println()
         if (!methodIsInvokable(method))
             return TryConcreteInvokeFail(false)
-
-        // TODO: delete!
-//        if (method.name == "end") {
-//            kill()
-//            state.skipMethodInvocationWithValue(stmt, ctx.voidValue)
-//            return TryConcreteInvokeSuccess()
-//        }
 
         val signature = method.humanReadableSignature
 
@@ -838,7 +844,6 @@ class JcConcreteMemory private constructor(
 
         private val concretizeInvocations = setOf(
             "org.springframework.web.servlet.DispatcherServlet#processDispatchResult(jakarta.servlet.http.HttpServletRequest,jakarta.servlet.http.HttpServletResponse,org.springframework.web.servlet.HandlerExecutionChain,org.springframework.web.servlet.ModelAndView,java.lang.Exception):void",
-//            "org.usvm.samples.strings11.StringConcat#concretize():void",
         )
 
         //endregion

@@ -98,6 +98,7 @@ import kotlin.reflect.KFunction2
 import kotlin.reflect.jvm.javaMethod
 import org.usvm.api.makeNullableSymbolicRefWithSameType
 import org.usvm.api.makeSymbolicRefSubtype
+import org.usvm.api.mapTypeStreamNotNull
 import org.usvm.api.readArrayIndex
 import org.usvm.api.readArrayLength
 import org.usvm.api.readField
@@ -356,7 +357,7 @@ class JcMethodApproximationResolver(
             val instance = arguments.first().asExpr(ctx.addressSort)
 
             val result = scope.calcOnState {
-                mapTypeStream(instance) { _, types ->
+                mapTypeStreamNotNull(instance) { _, types ->
                     val type = types.singleOrNull()
                     type?.let { exprResolver.simpleValueResolver.resolveClassRef(it) }
                 }
@@ -575,7 +576,7 @@ class JcMethodApproximationResolver(
 
     @Suppress("UNUSED_PARAMETER")
     private fun shouldSkipPath(path: String, kind: String): Boolean {
-        return path == "/vets" || path == "/vets.html" //path != "/owners/{ownerId}/pets/{petId}/edit" || kind != "post"
+        return false //path != "/owners/{ownerId}/pets/{petId}/edit" || kind != "post"
     }
 
     private fun allControllerPaths(): Map<String, Map<String, List<Any>>> {

@@ -176,7 +176,8 @@ internal class URefSetMemoryRegion<SetType>(
                     { symbolicElem ->
                         val id = allocatedSetWithInputElementsId(concreteRef.address)
                         getAllocatedSetWithInputElements(id).read(symbolicElem)
-                    }
+                    },
+                    ignoreNullRefs = false
                 )
             },
             { symbolicRef ->
@@ -187,7 +188,8 @@ internal class URefSetMemoryRegion<SetType>(
                     },
                     { symbolicElem ->
                         inputSetWithInputElements().read(symbolicRef to symbolicElem)
-                    }
+                    },
+                    ignoreNullRefs = false
                 )
             }
         )
@@ -205,6 +207,7 @@ internal class URefSetMemoryRegion<SetType>(
                 ref = key.setElement,
                 initial = setRegion,
                 initialGuard = setGuard,
+                ignoreNullRefs = false,
                 blockOnConcrete = { region, (concreteElemRef, guard) ->
                     val id = UAllocatedRefSetWithAllocatedElementId(concreteSetRef.address, concreteElemRef.address)
                     val newMap = region.allocatedSetWithAllocatedElements.guardedWrite(id, value, guard) {
@@ -225,6 +228,7 @@ internal class URefSetMemoryRegion<SetType>(
                 ref = key.setElement,
                 initial = setRegion,
                 initialGuard = setGuard,
+                ignoreNullRefs = false,
                 blockOnConcrete = { region, (concreteElemRef, guard) ->
                     val id = inputSetWithAllocatedElementsId(concreteElemRef.address)
                     val newMap = region.getInputSetWithAllocatedElements(id)

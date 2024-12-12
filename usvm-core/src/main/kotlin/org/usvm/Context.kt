@@ -367,7 +367,7 @@ open class UContext<USizeSort : USort>(
     ): UTrackedSymbol<Sort> = trackedSymbols.createIfContextActive {
         UTrackedSymbol(this, name = "tracked#${trackedIndex++}", sort)
     }.cast()
-    
+
     private val isSubtypeExprCache = mkAstInterner<UIsSubtypeExpr<Any>>()
     fun <Type> mkIsSubtypeExpr(
         ref: UHeapRef, type: Type,
