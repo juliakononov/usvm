@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package org.usvm.api.util
 
 import org.jacodb.api.jvm.JcClassOrInterface

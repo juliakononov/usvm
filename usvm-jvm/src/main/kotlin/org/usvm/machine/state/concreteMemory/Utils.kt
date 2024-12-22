@@ -230,7 +230,7 @@ internal fun Class<*>.toJcType(ctx: JcContext): JcType? {
             val db = ctx.cp.db
             val vfs = db.javaClass.allInstanceFields.find { it.name == "classesVfs" }!!.getFieldValue(db)!!
             val loc =
-                ctx.cp.registeredLocations.find { it.jcLocation?.jarOrFolder?.absolutePath?.startsWith("/Users/michael/Documents/Work/spring-petclinic/build/libs/BOOT-INF/classes") == true }!!
+                ctx.cp.registeredLocations.find { it.jcLocation?.jarOrFolder?.absolutePath?.startsWith("/home/julia/spring-petclinic/build/libs/BOOT-INF/classes") == true }!!
             val addMethod = vfs.javaClass.methods.find { it.name == "addClass" }!!
             val source = LazyClassSourceImpl(loc, typeName)
             addMethod.invoke(vfs, source)

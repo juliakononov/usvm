@@ -1,22 +1,20 @@
-package org.usvm.machine
+package org.usvm.machine.interactive
 
-import mu.KLogging
 import org.jacodb.api.jvm.JcClasspath
 import org.jacodb.api.jvm.JcMethod
 import org.jacodb.api.jvm.cfg.JcInst
 import org.jacodb.api.jvm.ext.humanReadableSignature
 import org.jacodb.api.jvm.ext.methods
 import org.usvm.CoverageZone
+import org.usvm.PathSelectionStrategy
 import org.usvm.StateCollectionStrategy
-import org.usvm.UMachine
 import org.usvm.UMachineOptions
 import org.usvm.api.targets.JcTarget
 import org.usvm.forkblacklists.TargetsReachableForkBlackList
 import org.usvm.forkblacklists.UForkBlackList
-import org.usvm.machine.interpreter.JcInterpreter
+import org.usvm.machine.*
 import org.usvm.machine.state.JcMethodResult
 import org.usvm.machine.state.JcState
-import org.usvm.machine.state.concreteMemory.ps.JcConcreteMemoryPathSelector
 import org.usvm.machine.state.lastStmt
 import org.usvm.ps.createPathSelector
 import org.usvm.statistics.*
@@ -24,29 +22,26 @@ import org.usvm.statistics.collectors.AllStatesCollector
 import org.usvm.statistics.collectors.CoveredNewStatesCollector
 import org.usvm.statistics.collectors.TargetsReachedStatesCollector
 import org.usvm.statistics.constraints.SoftConstraintsObserver
-import org.usvm.statistics.distances.*
+import org.usvm.statistics.distances.InterprocDistance
+import org.usvm.statistics.distances.InterprocDistanceCalculator
+import org.usvm.statistics.distances.MultiTargetDistanceCalculator
+import org.usvm.statistics.distances.PlainCallGraphStatistics
 import org.usvm.stopstrategies.createStopStrategy
-import org.usvm.util.originalInst
 
-val logger = object : KLogging() {}.logger
-
-open class JcMachine(
+class JcInteractiveMachine(
     cp: JcClasspath,
-    private val options: UMachineOptions,
+    private var options: UMachineOptions,
     private val jcMachineOptions: JcMachineOptions = JcMachineOptions(),
     private val interpreterObserver: JcInterpreterObserver? = null,
-) : UMachine<JcState>() {
-    protected val applicationGraph = JcApplicationGraph(cp)
+) : JcMachine(
+    cp,
+    options,
+    jcMachineOptions,
+    interpreterObserver
+) {
 
-    protected val typeSystem = JcTypeSystem(cp, options.typeOperationsTimeout)
-    private val components = JcComponents(typeSystem, options)
-    private val ctx = JcContext(cp, components)
 
-    protected val interpreter = JcInterpreter(ctx, applicationGraph, jcMachineOptions, interpreterObserver)
-
-    protected val cfgStatistics = CfgStatisticsImpl(applicationGraph)
-
-    open fun analyze(methods: List<JcMethod>, targets: List<JcTarget> = emptyList()): List<JcState> {
+    override fun analyze(methods: List<JcMethod>, targets: List<JcTarget>): List<JcState> {
         logger.debug("{}.analyze({})", this, methods)
         val initialStates = mutableMapOf<JcMethod, JcState>()
         methods.forEach {
@@ -86,7 +81,9 @@ open class JcMachine(
         val timeStatistics = TimeStatistics<JcMethod, JcState>()
         val loopTracker = JcLoopTracker()
 
-        var pathSelector = createPathSelector(
+        // create TARGETED pathSelector
+        options = options.copy(pathSelectionStrategies = listOf(PathSelectionStrategy.TARGETED))
+        val targetedPathSelector = createPathSelector(
             initialStates,
             options,
             applicationGraph,
@@ -94,9 +91,8 @@ open class JcMachine(
             { coverageStatistics },
             { transparentCfgStatistics },
             { callGraphStatistics },
-            { loopTracker }
-        )
-        pathSelector = JcConcreteMemoryPathSelector(pathSelector)
+            { loopTracker })
+        val pathSelector = JcInteractivePathSelector(targetedPathSelector)
 
         val statesCollector =
             when (options.stateCollectionStrategy) {
@@ -191,31 +187,5 @@ open class JcMachine(
         )
 
         return statesCollector.collectedStates
-    }
-
-    fun analyze(method: JcMethod, targets: List<JcTarget> = emptyList()): List<JcState> =
-        analyze(listOf(method), targets)
-
-    /**
-     * Returns a wrapper for the [cfgStatistics] that ignores [JcTransparentInstruction]s.
-     * Instead of calculating statistics for them, it just takes the statistics for
-     * their original instructions.
-     */
-    protected fun transparentCfgStatistics() = object : CfgStatistics<JcMethod, JcInst> {
-        override fun getShortestDistance(method: JcMethod, stmtFrom: JcInst, stmtTo: JcInst): UInt {
-            return cfgStatistics.getShortestDistance(method, stmtFrom.originalInst(), stmtTo.originalInst())
-        }
-
-        override fun getShortestDistanceToExit(method: JcMethod, stmtFrom: JcInst): UInt {
-            return cfgStatistics.getShortestDistanceToExit(method, stmtFrom.originalInst())
-        }
-    }
-
-    protected fun isStateTerminated(state: JcState): Boolean {
-        return state.callStack.isEmpty()
-    }
-
-    override fun close() {
-        components.close()
     }
 }
